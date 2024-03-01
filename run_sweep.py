@@ -48,7 +48,9 @@ exp_list=perms(diff)
 with open(f"{exp0_folder}/base.json") as file:
     base = json.load(file)
 
-print(f"Starting process with {len(exp_list)} experiments")
+# Get list of "experiment" json files from experiment todo folder
+exp_folder, exp_list = list_experiments(str(args.f))
+print(f"Starting process with {len(exp_list)} experiments ({exp_list}) from '{str(args.f)}/todo/'" )
 print(diff)
 # Loop over the experiments
 

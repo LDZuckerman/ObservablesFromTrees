@@ -1,6 +1,6 @@
 import os, json, shutil, argparse
 import os.path as osp
-from dev.utils import list_experiments
+from dev.train_script import run
 
 # Read in arguements 
 parser = argparse.ArgumentParser()
@@ -8,29 +8,18 @@ parser.add_argument("-f", "--f", type=str, required=True)
 parser.add_argument("-gpu", "--gpu", type=str, required=False)
 args = parser.parse_args()
 
-# Set training script based on gpu use
-if args.gpu=='1':
-    from dev.train_script_gpu import train_model
-else:
-    from dev.train_script_cpu import train_model
+# Load construction dictionary from json file
+exp_file = osp.join(osp.abspath(''), args.f)
+construct_dict = json.load(open(exp_file))
+#construct_dict['experiment_name']=args.f[:-5]
 
-# Get list of "experiment" json files from experiment todo folder
-exp_folder, exp_list = list_experiments(str(args.f))
-print(f"Starting process with {len(exp_list)} experiments ({exp_list}) from '{str(args.f)}/todo/'" )
+# Run experiment (train and val for each of n_trials)
+print(f'\nSETTING UP EXPERIMENT FROM {exp_file}')
+print(f'\nParameters are the following -> \n{construct_dict}')
+run(construct_dict, args.gpu)
 
-# Loop over experiments
-for i, experiment in enumerate(exp_list):
-    print(f'Running experiment {i} from {experiment})
-          
-    # Load construction dictionary from json file
-    with open(osp.join(exp_folder, experiment)) as file:
-        construct_dict = json.load(file)
-    construct_dict['experiment_name']=experiment[:-5]
-    
-    # Do training 
-    train_model(construct_dict)
+# # Move experiment file to "done" if desired
+# if construct_dict['move']:
+#     shutil.move(exp_file, osp.join(exp0_folder+"/done", experiment))
 
-    # Move experiment file to "done" if desired
-    if construct_dict['move']:
-        shutil.move(osp.join(exp_folder, experiment), osp.join(exp0_folder+"/done", experiment))
-    print(f"Experiment {experiment} done \t {experiment}: {i + 1} / {len(exp_list)}")
+#print(f"Experiment {experiment} done \t {experiment}: {i + 1} / {len(exp_list)}")
