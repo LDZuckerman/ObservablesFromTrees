@@ -213,6 +213,8 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
             figs = performance_plot(ys, pred, targ_names)
             for fig, label in zip(figs, targ_names): # label_names[data_params["targets"]]
                 fig.savefig(f'{out_dir_n}/performance_ne{n_epochs}_{label}.png')
+        final_testonval_preds = pred
+        final_testonval_ys = ys
         final_testonval_metric = np.std(ys-pred, axis=0)
         final_testonval_rmse = np.sqrt(np.mean((ys-pred)**2, axis=0))
         # preds_alltrials.append(pred)
@@ -248,14 +250,16 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
         
         # Add to params and metrics dicts to writer and save results dict as pickle
         writer.add_hparams(paramsf, metricf, run_name=run_name_n) 
-        result_dict={'train loss each epoch': tr_losses,
-                     'lr each val epoch': lrs,
-                     'val scatter each val epoch': va_metrics, 
-                     'train scatter each val epoch': tr_metrics,
-                     'val rmse each val epoch': va_rmses, 
-                     'train rmse each val epoch': tr_rmses,
-                     'val scatter final test': final_testonval_metric, 
-                     'val rmse final test': final_testonval_rmse,
+        result_dict={'train loss each epoch': tr_losses,            # [n_epochs]
+                     'lr each val epoch': lrs,                      # [n_epochs/val_epoch]    
+                     'val scatter each val epoch': va_metrics,      # [n_epochs/val_epoch, n_targs]
+                     'train scatter each val epoch': tr_metrics,    # [n_epochs/val_epoch, n_targs]
+                     'val rmse each val epoch': va_rmses,           # [n_epochs/val_epoch, n_targs]
+                     'train rmse each val epoch': tr_rmses,         # [n_epochs/val_epoch, n_targs]
+                     'val sig final test': final_testonval_metric,  # [n_targs]
+                     'val rmse final test': final_testonval_rmse,   # [n_targs]
+                     'val preds final test': final_testonval_preds, # [n_val_samples, n_targs]
+                     'val ys final test': final_testonval_ys,       # [n_val_samples, n_targs]
                       #'ys': ys, 'pred': pred, 'low_ys': low_ys, 'low_pred': low_pred, 'low':lowest_metrics, 'vars': vars, 'rhos': rhos,  # Why is it usefull to save these at all? 
                      'epochexit': epochexit}
         with open(f'{out_dir_n}/result_dict.pkl', 'wb') as handle:
