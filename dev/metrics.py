@@ -7,11 +7,10 @@ import numpy as np
 ### different funcs to calculate metrics  ####
 ##################################################
 
-mus, scales = np.array([-1.1917865,  1.7023178,  -0.14979358, -2.5043619]), np.array([0.9338901, 0.17233825, 0.5423821, 0.9948792])  ### training set mus/sigs to scale back
 
 def scatter(loader, model, n_targ):
+    
     model.eval()
-
     correct = 0
     with no_grad():
         for dat in loader: 
@@ -20,14 +19,14 @@ def scatter(loader, model, n_targ):
     return sqrt(correct/len(loader.dataset)).cpu().detach().numpy()
 
 def test_multi(loader, model, targs, l_func, scale):
-    model.eval()
+    
     n_targ=len(targs)
-    outs = []
-    ys = []
+    outs, ys = [], []
+    model.eval()
     if scale:
         sca=FloatTensor(scales[targs])
         ms=FloatTensor(mus[targs])
-    with no_grad(): ##this solves it!!!
+    with no_grad(): 
         for data in loader: 
             if l_func in ["L1", "L2", "SmoothL1"]: 
                 out = model(data)  
@@ -35,28 +34,19 @@ def test_multi(loader, model, targs, l_func, scale):
                 out, var = model(data)  
             if l_func in ["Gauss2d_corr, Gauss4d_corr"]:
                 out, var, rho = model(data) 
-            if scale:
-                ys.append(data.y.view(-1,n_targ)*sca+ms)
-                outs.append(out*sca+ms)
-            else:
-                ys.append(data.y.view(-1,n_targ))
-                outs.append(out)
-    outss=vstack(outs)
-    yss=vstack(ys)
+            ys.append(data.y.view(-1,n_targ))
+            outs.append(out)
+    outss = vstack(outs)
+    yss = vstack(ys)
     return std(outss - yss, axis=0).cpu().detach().numpy(), yss.cpu().detach().numpy(), outss.cpu().detach().numpy()
 
 
-def test_multi_varrho(loader, model, targs, l_func, scale): 
+def test_multi_varrho(loader, model, targs, l_func): 
     '''This one is the most updated'''
-    model.eval()
+
     n_targ=len(targs)
-    outs = []
-    ys = []
-    vars = []
-    rhos = []
-    if scale:
-        sca=FloatTensor(scales[targs])
-        ms=FloatTensor(mus[targs])
+    outs, ys, vars, rhos = [], [], [], []
+    model.eval()
     with no_grad(): 
         for data in loader: 
             rho = IntTensor(0)
@@ -67,17 +57,43 @@ def test_multi_varrho(loader, model, targs, l_func, scale):
                 out, var = model(data)  
             if l_func in ["Gauss2d_corr", "Gauss4d_corr"]:
                 out, var, rho = model(data) 
-            if scale:
-                ys.append(data.y.view(-1,n_targ)*sca+ms)
-                outs.append(out*sca+ms)
-            else:
-                ys.append(data.y.view(-1,n_targ))
-                outs.append(out)
+            ys.append(data.y.view(-1,n_targ))
+            outs.append(out)
             vars.append(var)
             rhos.append(rho)
 
-    outss=vstack(outs)
-    yss=vstack(ys)
-    vars = vstack(vars)
+    outss = vstack(outs) # preds
+    yss = vstack(ys) # trues
+    vars = vstack(vars) #
     rhos = vstack(rhos)
+
     return std(outss - yss, axis=0).cpu().detach().numpy(), yss.cpu().detach().numpy(), outss.cpu().detach().numpy(), vars, rhos
+
+
+# def test(loader, model, n_targ, l_func): PUTTING THIS HERE TO COMPARE TO ABOVE FUNCTIONS
+#     '''
+#     Returns targets and predictions, and some test metrics
+#     NOTE: this is bassically another metric function that should be in metrics.py
+#     '''
+#     ys, pred, vars, rhos = [],[], [], []
+#     model.eval()
+#     with torch.no_grad():
+#         for data in loader: 
+#             rho = torch.IntTensor(0)
+#             var = torch.IntTensor(0)
+#             if l_func in ["L1", "L2", "SmoothL1"]: 
+#                 out = model(data)  
+#             if l_func in ["Gauss1d", "Gauss2d", "GaussNd"]:
+#                 out, var = model(data)  
+#             if l_func in ["Gauss2d_corr", "Gauss4d_corr"]:
+#                 out, var, rho = model(data) 
+#             ys.append(data.y.view(-1,n_targ))
+#             pred.append(out)
+#             vars.append(var)
+#             rhos.append(rho)
+#     ys = torch.vstack(ys)
+#     pred = torch.vstack(pred)
+#     vars = torch.vstack(vars)
+#     rhos = torch.vstack(rhos)
+
+#     return ys.cpu().numpy(), pred.cpu().numpy(), vars, rhos    

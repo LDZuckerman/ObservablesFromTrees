@@ -29,14 +29,12 @@ class cosanneal():
 
 class warmup_exp():
     '''Double exponential'''
-
     def __init__(self,optimizer, g_up=2, g_down=0.95, warmup=5, period=5, eta_min=1e-5,  learning_rate=1, schedule='null', total_steps=10000):
-
         self.warmup=warmup
         self.up = ExponentialLR(optimizer, gamma=g_up)
         self.down = ExponentialLR(optimizer, gamma=g_down)
     def step(self, epoch):
-        if epoch<self.warmup:    
+        if epoch < self.warmup:    
             self.up.step()
         else:
             self.down.step()
@@ -52,6 +50,6 @@ class constant():
 class onecycle():
     '''One cycle LR scheme, not guaranteed to be optimal, but it's pretty stable for lr <1e-2'''
     def __init__(self,optimizer, g_up=2, g_down=0.95, warmup=5, period=5, eta_min=1e-5,  learning_rate=1, schedule='null', total_steps=10000):
-        self.s1=OneCycleLR(optimizer, max_lr=learning_rate, total_steps=total_steps, pct_start=0.15, final_div_factor=1e3)
+        self.s1 = OneCycleLR(optimizer, max_lr=learning_rate, total_steps=total_steps, pct_start=0.15, final_div_factor=1e3)
     def step(self, epoch):
         self.s1.step()

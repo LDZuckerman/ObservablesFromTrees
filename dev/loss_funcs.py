@@ -75,9 +75,9 @@ def Gauss2d(pred, ys, var):
 
 def GaussNd(pred, ys, var):
     '''General uncorrelated gaussian, if you're having trouble you can try adding a small number to your sigmas'''
-    z=(pred-ys)/var
-    sigloss=sum(log(var))
-    err_loss = sum((square(z)))/2
+    z = (pred-ys)/var # error (preds - ys) scaled by some sort of variance (of what?)
+    sigloss = sum(log(var))
+    err_loss = sum((square(z)))/2 # sum of sqaure errors (but then over 2)
     
     return err_loss+sigloss, err_loss, sigloss    
 

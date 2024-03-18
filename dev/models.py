@@ -20,7 +20,6 @@ class MLP(Module):
     def forward(self, x):
         return self.mlp(x)
 
-
 class Sage(Module):
     def __init__(self, hidden_channels, in_channels, out_channels, encode=True, conv_layers=3, conv_activation='relu', 
                     decode_layers=2, decode_activation='none', layernorm=True, variance=0, agg='sum', rho=0):
@@ -41,6 +40,7 @@ class Sage(Module):
         self.variance=variance
         self.agg=agg
         self.rho=rho
+        
         ########################
         # Convolutional Layers #
         ######################## 
@@ -121,11 +121,9 @@ class Sage(Module):
 
     def conv_act_f(self):
         if self.conv_activation =='relu':
-            print('RelU conv activation')
             act = ReLU()
             return act
         if self.conv_activation =='leakyrelu':
-            print('LeakyRelU conv activation')
             act=LeakyReLU()
             return act
         if not self.conv_activation:
@@ -133,11 +131,9 @@ class Sage(Module):
 
     def decode_act_f(self):
         if self.decode_activation =='relu':
-            print('RelU decode activation')
             act = ReLU()
             return act
         if self.decode_activation =='leakyrelu':
-            print('LeakyRelU decode activation')
             act=LeakyReLU()
             return act
         if not self.decode_activation:
@@ -148,6 +144,8 @@ class Sage(Module):
 
         #get the data
         x, edge_index, batch = graph.x, graph.edge_index, graph.batch
+        x = x.float() # converts from float64 (e.g. "double") to float32 (which model wants)
+
         #encode
         if self.encode:
             x = self.node_enc(x)
