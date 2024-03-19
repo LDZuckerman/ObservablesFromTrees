@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 import networkx as nx
 from itertools import count
+import io
 
 # Make dictionary of (cm_ID, tree) for all trees
 def prep_trees(ctrees_path, featnames, phot_ids, metafile, save_path, zcut=('before', np.inf), Mlim=10, sizelim=np.inf, tinytest=False, downsize_method=3): 
@@ -828,3 +829,11 @@ def hierarchy_pos(G, root=None, width=1., vert_gap = 0.2, vert_loc = 0, leaf_vs_
     for node in pos:
         pos[node]= (pos[node][0]*width/xmax, pos[node][1])
     return pos
+
+
+class CPU_Unpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module == 'torch.storage' and name == '_load_from_bytes':
+            return lambda b: torch.load(io.BytesIO(b), map_location='cpu')
+        else:
+            return super().find_class(module, name)

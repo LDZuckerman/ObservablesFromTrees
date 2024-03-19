@@ -37,7 +37,7 @@ run(d['run_params'], d['data_params'], d['learn_params'], d['hyper_params'], out
 
 # Move slurm output file to output dir
 if args.jobname is not None:
-    shutil.move(f"SlurmOut/{args.jobname}", f"{out_pointer}/SlurmOut/")
+    shutil.move(f"SlurmOut/{args.jobname}.out", f"{out_pointer}/SlurmOut/")
     print(f"   Moved slurm output file to {out_pointer}/")
 print('DONE')
 
