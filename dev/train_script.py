@@ -30,10 +30,12 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
     val_epoch = run_params['val_epoch']
     exitepochs = [] # epoch at which exited training (or list of epochs if n_trials > 1), if early stopping 
     
-    # Get loss function 
+    # Get loss function s
     if run_params['seed']: torch.manual_seed(42)
     loss_func = run_utils.get_loss_func(run_params['loss_func'])
-    get_var = True if loss_func in ["Gauss1d", "Gauss2d", "GaussNd", "Gauss2d_corr", "Gauss4d_corr"] else False
+    if run_params['predict_mu_sig'] and loss_func != 'Navarro':
+        raise ValueError(f"Currently must use Navarro loss function when predicting distribution parameters")
+    get_var = True if loss_func in ["Gauss1d", "Gauss2d", "GaussNd", "Gauss2d_corr", "Gauss4d_corr", 'Navarro'] else False
     get_rho = True if loss_func in ["Gauss2d_corr", "Gauss4d_corr"] else False 
     
     # Set learning rate and schedular
@@ -64,7 +66,7 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
     performance_plot = get_performance_plot(run_params['performance_plot'])
     # tr_accs_alltrials, va_accs_alltrials, scatter_alltrials, = [], [], [] # lists in case n_trials > 1  # REALLY TEST_ACCS IF TEST IF TEST=1 IN JSON
     # preds_alltrials, lowest_alltrials = [], [] # lists in case n_trials > 1 
-    s
+    
     ############### LOOP THROUGH TRIALS ###################
     
     # Perform experiment (either once or n_trials times)
@@ -104,7 +106,7 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
         low_ys = torch.tensor([np.inf]) # added this so that can have get_val_results as a function
         low_pred = torch.tensor([np.inf]) # added this so that can have get_val_results as a function
         tr_losses = [] # add this to track training loss for each epoch, instead of just accuracy when tested on training set every n_epochs epochs
-        tr_metrics, va_metrics = [],[] # acc is really 'metric' which is sigma (scatter) # REALLY TE_ACC IF TEST=1 IN JSON!!!
+        tr_metrics, va_metrics = [],[] # acc is really 'metric' which is sigma (scatter) 
         tr_rmses, va_rmses = [],[]
         lrs = [] # add this to track current lr for all val epochs
 
@@ -281,6 +283,8 @@ def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_fu
 
     if gpu == '1': init = torch.cuda.FloatTensor([0])
     else: init = torch.FloatTensor([0])
+    get_var = True if loss_func in ["Gauss1d", "Gauss2d", "GaussNd", "Gauss2d_corr", "Gauss4d_corr", 'Navarro'] else False
+    get_rho = True if loss_func in ["Gauss2d_corr", "Gauss4d_corr"] else False 
     er_loss = torch.clone(init)
     si_loss = torch.clone(init)
     rh_loss = torch.clone(init)
@@ -289,25 +293,19 @@ def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_fu
     for data in train_loader: 
         if gpu == '0':
             data = data.to('cpu')
-        if run_params["loss_func"] in ["L1", "L2", "SmoothL1"]: 
+        if get_var:
+            if get_rho: 
+                out, var, rho = model(data)  
+                loss, err_loss, sig_loss, rho_loss = loss_func(out, data.y.view(-1,n_targ), var, rho)
+                rh_loss+=rho_loss # if "Gauss4d_corr", rho_loss is np.NaN
+            else: 
+                out, var = model(data)  
+                loss, err_loss, sig_loss = loss_func(out, data.y.view(-1,n_targ), var) # loss = total loss = err_los + sig_loss
+            er_loss+=err_loss
+            si_loss+=sig_loss
+        else:
             out = model(data)  
             loss = loss_func(out, data.y.view(-1,n_targ))
-        if run_params["loss_func"] in ["Gauss1d", "Gauss2d", "GaussNd"]:
-            out, var = model(data)  
-            loss, err_loss, sig_loss = loss_func(out, data.y.view(-1,n_targ), var) # loss = total loss = err_los + sig_loss
-            er_loss+=err_loss
-            si_loss+=sig_loss
-        if run_params["loss_func"] in ["Gauss2d_corr"]:
-            out, var, rho = model(data)  
-            loss, err_loss, sig_loss, rho_loss = loss_func(out, data.y.view(-1,n_targ), var, rho)
-            er_loss+=err_loss
-            si_loss+=sig_loss
-            rh_loss+=rho_loss
-        if run_params["loss_func"] in ["Gauss4d_corr"]:
-            out, var, rho = model(data)  
-            loss, err_loss, sig_loss = loss_func(out, data.y.view(-1,n_targ), var, rho)
-            er_loss+=err_loss
-            si_loss+=sig_loss
         l1_norm = sum(p.abs().sum() for p in model.parameters())
         l2_norm = sum(p.pow(2.0).sum() for p in model.parameters()) 
         loss = loss + l1_lambda * l1_norm + l2_lambda * l2_norm # add other terms to loss

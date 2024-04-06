@@ -1,6 +1,7 @@
 from uu import Error
 from torch.nn import MSELoss, L1Loss, SmoothL1Loss
 from torch import log, sum, square, vstack, zeros, bmm, det, inverse
+import numpy as np
 
 
 ###############################
@@ -48,7 +49,7 @@ def Gauss1d(pred, ys, sig): # If predicting exactly 1 target?
     
     return err_loss+sigloss, err_loss, sigloss
 
-def dist_loss(pred_mu, pred_var, ys):
+def Navarro(pred_mu, pred_var, ys):
     '''
     Attempt to implement loss func for model predicting mean and var instead of y
     '''
@@ -58,7 +59,7 @@ def dist_loss(pred_mu, pred_var, ys):
     sig_err = ((pred_mu - ys)**2 - pred_sig**2)**2
     t2 = sum(log(sum(sig_err)))
 
-    return t1 + t2
+    return t1 + t2, t1, t2
 
 def GuassNd_corr():
 
@@ -100,4 +101,4 @@ def Gauss4d_corr(pred, ys, sig, rho): # If predicting exactly 4 targets?
     err=delta*bmm(sig_inv, delta.unsqueeze(2))[:,:,0]
     err_loss = sum(err)/2
     
-    return err_loss+detloss, err_loss, detloss
+    return err_loss+detloss, err_loss, detloss, np.NaN  # return 4th element for consistency - yes, this is wonky
