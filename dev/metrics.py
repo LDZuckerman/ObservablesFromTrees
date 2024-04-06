@@ -69,31 +69,3 @@ def test_multi_varrho(loader, model, targs, l_func):
 
     return std(outss - yss, axis=0).cpu().detach().numpy(), yss.cpu().detach().numpy(), outss.cpu().detach().numpy(), vars, rhos
 
-
-# def test(loader, model, n_targ, l_func): PUTTING THIS HERE TO COMPARE TO ABOVE FUNCTIONS
-#     '''
-#     Returns targets and predictions, and some test metrics
-#     NOTE: this is bassically another metric function that should be in metrics.py
-#     '''
-#     ys, pred, vars, rhos = [],[], [], []
-#     model.eval()
-#     with torch.no_grad():
-#         for data in loader: 
-#             rho = torch.IntTensor(0)
-#             var = torch.IntTensor(0)
-#             if l_func in ["L1", "L2", "SmoothL1"]: 
-#                 out = model(data)  
-#             if l_func in ["Gauss1d", "Gauss2d", "GaussNd"]:
-#                 out, var = model(data)  
-#             if l_func in ["Gauss2d_corr", "Gauss4d_corr"]:
-#                 out, var, rho = model(data) 
-#             ys.append(data.y.view(-1,n_targ))
-#             pred.append(out)
-#             vars.append(var)
-#             rhos.append(rho)
-#     ys = torch.vstack(ys)
-#     pred = torch.vstack(pred)
-#     vars = torch.vstack(vars)
-#     rhos = torch.vstack(rhos)
-
-#     return ys.cpu().numpy(), pred.cpu().numpy(), vars, rhos    

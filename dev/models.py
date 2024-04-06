@@ -1,4 +1,6 @@
 import torch.nn.functional as F
+import torch
+from torch import nn
 from torch.nn import Linear, LayerNorm, LeakyReLU, Module, ReLU, Sequential, ModuleList
 from torch_geometric.nn import SAGEConv, global_mean_pool, norm, global_max_pool, global_add_pool, MetaLayer
 from torch_scatter import scatter_mean, scatter_sum, scatter_max, scatter_min, scatter_add
@@ -179,7 +181,8 @@ class Sage(Module):
                     x1=d(n(x1))
                     x1=self.decode_act(x1) ##note that these are LeakyReLU and should continue as such, otherwise you have to remove them from the last layer
                 sig.append(x1)
-            sig=abs(cat(sig, dim=1)) #stability
+
+            sig=abs(cat(sig, dim=1)) # calls this alternatively std and var... which is better to use? 
 
         if self.rho!=0:
             rho=[]
@@ -1139,3 +1142,19 @@ class MetaEdge(Module):
                 return x_out, sig
         else:
             return x_out
+
+############################
+# Simple model for predicting targets from ONLY final halo properties
+############################
+        
+class SimpleNet(nn.Module):
+
+  def __init__(self, hidden_layers, in_channels, out_channels): 
+    super(SimpleNet, self).__init__()
+    self.linear1 = nn.Linear(in_channels, hidden_layers) 
+    self.linear2 = nn.Linear(hidden_layers, out_channels) 
+    
+  def forward(self, x):
+    x = torch.sigmoid(self.linear1(x))
+    x = self.linear2(x)
+    return x

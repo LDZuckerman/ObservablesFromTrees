@@ -7,14 +7,15 @@ import os, json, shutil, argparse
 import os.path as osp
 from tkinter import FALSE
 from networkx import hypercube_graph
-from sympy import hyper
-from dev.train_script import run
+from sympy import hyper, print_ccode
+import dev.train_script as train_script
 
 # Read in arguements 
 parser = argparse.ArgumentParser()
 parser.add_argument("-f", "--f", type=str, required=True)
 parser.add_argument("-gpu", "--gpu", type=str, required=False)
-parser.add_argument("-jobname", "--jobname", type=str, required=False)
+#parser.add_argument("-jobname", "--jobname", type=str, required=False)
+parser.add_argument("-redo", "--redo", type=str, required=False, default='False')
 args = parser.parse_args()
 
 # Load construction dictionary from exp json file
@@ -22,23 +23,27 @@ exp_file = osp.expanduser(args.f) # osp.join(osp.abspath(''), args.f)
 d = json.load(open(exp_file))
 print(f"Experiment parameters: \n{d}\n")
 print(f'\nSETTING UP EXPERIMENT\n') # print(f'\nParameters are the following -> \n{d}')
-print(f"Loading experiment from {args.f}")
 
 # Set up output and copy experiment json file to output dir 
 out_pointer = osp.expanduser(f"{d['task_dir']}{d['exp_id']}") # Dir for saving all training outputs (if n_trial > 1, will create subfolders. Will also have subfolder for TF logging)
 if not osp.exists(out_pointer):
-    print(f"   Makeing output directory {out_pointer}/")
+    print(f"Makeing output directory {out_pointer}/")
     os.makedirs(out_pointer)
-print(f"   Copying experiment file into {out_pointer}/ for future reference")
-shutil.copy(exp_file, out_pointer) 
+elif osp.exists(out_pointer) and osp.exists(osp.join(out_pointer, 'result_dict.pkl')) and not bool(args.redo):
+    raise ValueError(f"   CUATION: Output directory {out_pointer}/ already seems to already have a trained model in it, and redo flag is False.")
+elif osp.exists(out_pointer) and osp.exists(osp.join(out_pointer, 'result_dict.pkl')) and bool(args.redo):
+    print(f"   Redo flag is True, deleting result_dict.pkl and mode_best.pt from exp folder")
+    os.remove(osp.join(out_pointer, 'result_dict.pkl'))
+    os.remove(osp.join(out_pointer, 'model_best.pt'))
+try: 
+    shutil.copy(exp_file, out_pointer) 
+    print(f"Copying experiment file into {out_pointer}/ for future reference")
+except shutil.SameFileError: 
+    print(f"Using experiment file in {out_pointer}/")
 
-# Run experiment (train and val for each of n_trials)
-run(d['run_params'], d['data_params'], d['learn_params'], d['hyper_params'], out_pointer, d['exp_id'], args.gpu)
 
-# Move slurm output file to output dir
-if args.jobname is not None:
-    shutil.move(f"SlurmOut/{args.jobname}.out", f"{out_pointer}/SlurmOut/")
-    print(f"   Moved slurm output file to {out_pointer}/")
+# Train (train and val for each of n_trials)
+train_script.run(d['run_params'], d['data_params'], d['learn_params'], d['hyper_params'], out_pointer, d['exp_id'], args.gpu)
 print('DONE')
 
 

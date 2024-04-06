@@ -1,6 +1,7 @@
 from calendar import firstweekday
 from curses.ascii import RS
 import pickle, time, os
+from flask import g
 import numpy as np
 import os.path as osp
 from datetime import date, datetime
@@ -12,6 +13,7 @@ os.environ['TORCH'] = torch.__version__
 import torch_geometric as tg
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Data
+from torch.utils.data import Dataset as Dataset_notgeom
 
 import illustris_python as il
 import pandas as pd
@@ -23,8 +25,9 @@ from matplotlib import cm
 import networkx as nx
 from itertools import count
 import io
+from sklearn.model_selection import train_test_split
 
-# Make dictionary of (cm_ID, tree) for all trees
+# Make dictionary of (cm_ID, tree DF) for all trees
 def prep_trees(ctrees_path, featnames, phot_ids, metafile, save_path, zcut=('before', np.inf), Mlim=10, sizelim=np.inf, tinytest=False, downsize_method=3): 
           
     # Prepare to load tree data 
@@ -77,7 +80,7 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, save_path, zcut=('bef
             halo_z0 = tree.iloc[0]
             rstar_id = str(int(halo_z0['Orig_halo_ID(30)']))
             # Ignore trees that trace history of non-central, low-mass, or low_resolution halos. 
-            lowmass = halo_z0['Mvir(10)'] <= Mlim # if too low mass
+            lowmass = halo_z0['Mvir(10)'] <= Mlim # if final halo too low mass
             satelite = halo_z0['pid(5)'] != '-1' # if not central
             SFcut = rstar_id not in phot_ids # if cut based on SF criteria (e.g. not central according to SF, or low resolution)
             toolong = len(haloset) > sizelim # Christian cut out those over 20000, but Rachel says not to
@@ -124,22 +127,22 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, save_path, zcut=('bef
     return 
 
 # Make dictionary of (subhalo, phot) for all central subhalos
-def prep_phot(obscat_path, metafile, save_path, reslim=100):
+def prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile, save_path, reslim=100):
 
-    meta = {'label_names': ["U", "V", "B", "K", "g", "r", "i", "z"], 
-            'reslim': reslim, 'galaxies res cut': 0, 'galaxies sat cut': 0, 
+    meta = {'label_names': ["U", "B", "V", "K", "g", "r", "i", "z"], 'reslim': reslim, # Note: had a typo swapping V and B, but I've fixed that
+            'tot galaxies': 0, 'tot galaxies saved': 0, 
+            'galaxies res cut': 0, 'galaxies sat cut': 0, 
             'start stamp': str(datetime.now())}
 
     # Load files for crossmatching to rstar IDs
-    crossmatchRSSF_path = '/mnt/sdceph/users/sgenel/IllustrisTNG/L75n1820TNG_DM/postprocessing/trees/rockstar/matches/rockstar_subhalo_matching_to_FP.hdf5'
     cmRSSF_list = h5py.File(crossmatchRSSF_path, 'r')['Snapshot_99']['SubhaloIndexDarkRockstar_SubLink'][:]
-    rstar_path = '/mnt/sdceph/users/sgenel/IllustrisTNG/L75n1820TNG_DM/postprocessing/trees/rockstar/groups_099/fof_subhalo_tab_099.0.hdf5'
     rstar_subhalo_ids = np.array(h5py.File(rstar_path, 'r')['Subhalo']['Subhalo_ID'])
 
     # Load subhalo photometry and resolution
     subhalos = il.groupcat.loadSubhalos(basePath = obscat_path, snapNum=99)
     sh_phot = subhalos['SubhaloStellarPhotometrics']
     sh_res = subhalos['SubhaloLenType'][:,4] # 4 for star particles 
+    meta['tot galaxies'] = len(sh_phot)
 
     # Get central subhalo indices
     groups = il.groupcat.loadHalos(basePath = obscat_path, snapNum=99)
@@ -161,18 +164,25 @@ def prep_phot(obscat_path, metafile, save_path, reslim=100):
         rstar_id = int(rstar_subhalo_ids[rstar_read_idx])
         # Add phot to dict under rstar_id
         all_phot[str(rstar_id)] = sh_phot[idx] 
+        meta['tot galaxies saved'] += 1
 
     # Save to pickle
     print(f'\tSaving phot in {save_path} and meta in {metafile}', flush=True)     
     with open(save_path, 'wb') as f:
         pickle.dump(all_phot, f)
-    listmeta = [{'obs meta':meta}]
+    #listmeta = [{'obs meta':meta}]
+    # with open(metafile, 'w') as f:
+    #     json.dump(listmeta, f) 
+    with open(metafile, 'r+') as f: # with w+ I cant read it but if I write to it with r+ I cant read the new file
+        listmeta = json.load(f) 
+    if list(listmeta[-1].keys())[0] == 'obs meta': # If graph meta already exists (this is a re-do), remove old obs meta
+        listmeta = listmeta[:-1]
+    listmeta.append({'obs meta':meta}) 
     with open(metafile, 'w') as f:
-        json.dump(listmeta, f) 
+        json.dump(listmeta, f)
     f.close()
     
-    return all_phot
-        
+    return all_phot        
 
 # Combine prepared trees and TNG subfind photometry into pytorch data objects
 def make_graphs(alltrees, allphot, featnames, metafile, save_path): 
@@ -237,7 +247,129 @@ def make_graphs(alltrees, allphot, featnames, metafile, save_path):
     f.close()
 
     return dat
- 
+
+ # Collect other targets for the same galaxies as in the photometry
+def collect_othertargs(obscat_path, alltrees, volname, save_path, reslim=100):
+    '''
+    The graphs in allgraphs are a SUBSET of the galaxies in all_obs, so this will be tricky
+    Recreate prep_phot but return other SG targs instead (but still with rstar idx as key)
+    Then receate make_graphs, but instead of making the graphs, just stack the targs for the gals with the rstar idxs that are in alltrees
+    Then acces them at testidxs in testidx file 
+    NOTE: This would be similar to what I'd need to do to construct a DS on other obs but using the same trees (tree generation is the slow part)
+      Difference is that right now I am not going to save full graphs, just save the targs in the correct order
+      Also, instead of saving dict of {rstar_id:, targs}, I want to be able to easily access multiple targs, so Im gonna store a df with cols being rstar id and then targ names
+      Note that for the future need to ensure run_dataprep.py and stuff are felxible about using the same graph sets but different targs (maybe they are already)
+    '''
+
+    # Load files for crossmatching to rstar IDs
+    crossmatchRSSF_path = f'/mnt/sdceph/users/sgenel/IllustrisTNG/{volname}_DM/postprocessing/trees/rockstar/matches/rockstar_subhalo_matching_to_FP.hdf5'
+    cmRSSF_list = h5py.File(crossmatchRSSF_path, 'r')['Snapshot_99']['SubhaloIndexDarkRockstar_SubLink'][:]
+    rstar_path = f'/mnt/sdceph/users/sgenel/IllustrisTNG/{volname}_DM/postprocessing/trees/rockstar/groups_099/fof_subhalo_tab_099.0.hdf5'
+    rstar_subhalo_ids = np.array(h5py.File(rstar_path, 'r')['Subhalo']['Subhalo_ID'])
+
+    # Targets to load
+    to_store = {'SubhaloBHMass': r'Black Hole Mass [$10^{10}$M$_{\odot}/h$)]', # why would this be different than SubhaloMassType[5]?
+                'SubhaloBHMdot': r'Black Hole Accretion Rate [$10^{10}$M$_{\odot}/h$/yr]', 
+                'SubhaloGasMetallicity': 'Gas Metallicity', 
+                'SubhaloHalfmassRad': 'Halfmass Radius [ckpc/h]',
+                'SubhaloMass': r'Total Mass [$10^{10}$M$_{\odot}/h$]', 
+                'SubhaloGasMass': r'Gass Mass [$10^{10}$M$_{\odot}/h$]',
+                'SubhaloStelMass': r'Stellar Mass [$10^{10}$M$_{\odot}/h$]',
+                'SubhaloSFR': r'Star Formation Rate [M$_{\odot}$/yr]', 
+                'SubhaloStarMetallicity': r'Stellar Metallicity [M$_z$/M$_{tot}$]', 
+                'SubhaloVelDisp': r'Velocity Dispersion [km/s]', 
+                'SubhaloVmax': r'V_${max}$ [km/s]',
+                'SubhaloRes': 'Resolution',
+                }
+
+    # Load a variety of subhalo targets, and resolution
+    subhalos = il.groupcat.loadSubhalos(basePath = obscat_path, snapNum=99)
+    sh_res = subhalos['SubhaloLenType'][:,4] # 4 for star particles 
+
+    # Get central subhalo indices
+    groups = il.groupcat.loadHalos(basePath = obscat_path, snapNum=99)
+    ctl_idxs = groups['GroupFirstSub'] # for each group, the idx w/in "subhalos" that is its central subhalo (-1 if group as no subhalos)
+    ctl_idxs = ctl_idxs[ctl_idxs != -1] # remove groups with no subhalos
+    galaxies_sat_cut = len(sh_res) - len(ctl_idxs) # for checking that the same cuts are being applied as in prep_phot
+    print(f'\tTotal of {len(sh_res)} subhalos, with {len(ctl_idxs)} being central', flush=True)  
+
+    # Add photometry for all central subhalos to dict
+    all_targs =  pd.DataFrame(columns=['rstar_id']+list(to_store.keys()))
+    galaxies_res_cut = 0 # for checking that the same cuts are being applied as in prep_phot
+    galaxies_saved = 0 # for checking that the same cuts are being applied as in prep_phot
+    for idx in ctl_idxs:
+        # Remove if not central or resolution too low, otherwise start list of values
+        if (sh_res[idx] < reslim): 
+            galaxies_res_cut += 1 
+            continue
+        # Get rstar_id for matching to tree
+        subfind_read_idx = idx
+        rstar_read_idx = cmRSSF_list[subfind_read_idx]
+        rstar_id = int(rstar_subhalo_ids[rstar_read_idx])
+        # Add targ values to list
+        info = []
+        info.append(str(int(rstar_id)))
+        for key in to_store.keys():
+            if key == 'SubhaloRes': info.append(sh_res[idx])
+            elif key == 'SubhaloGasMass': info.append(subhalos['SubhaloMassType'][idx,0]) # WAS [IDX][O] BUT I DONT THINK THAT SHOULD BE THE PROBLEM
+            elif key == 'SubhaloStelMass': info.append(subhalos['SubhaloMassType'][idx,4])
+            else: info.append(subhalos[key][idx])
+        # Add list to DF
+        all_targs.loc[len(all_targs)] = info
+
+    # Collect just the galaxies that are in the stored trees
+    all_targs_out = pd.DataFrame(columns = all_targs.columns)
+    for rstar_id in list(alltrees.keys()):
+       all_targs_out.loc[len(all_targs_out)] = all_targs[all_targs['rstar_id'] == rstar_id].iloc[0]
+
+    # all_targs = all_targs[all_targs['rstar_id'].isin(list(alltrees.keys()))]
+    all_targs_out = all_targs_out.drop(columns=['rstar_id'])
+
+    # Save target data and target descriptions
+    print(f'\tSaving collected targets in {save_path}', flush=True)     
+    with open(save_path, 'wb') as f:
+        pickle.dump(all_targs_out, f)
+    f.close()
+    with open('../Data/subfind_othertargdescriptions.json', 'w') as f:
+        json.dump(to_store, f) 
+
+    return all_targs, galaxies_res_cut, galaxies_saved, galaxies_sat_cut
+
+def collect_MHmetrics(testdata, used_feats, all_featnames, ft_test, save_path):
+    # Should I also add metrics about SFH? That would require something similar to collect_othertargs
+    # I should probabaly also be doing t_50, etc, but I think converting from z to t is nontrivial 
+
+    all_metrics = pd.DataFrame(columns=['n_halos', 'z_25', 'z_50', 'z_75'])
+
+    scale_col = used_feats.index('#scale(0)')
+    mass_col = used_feats.index('Mvir(10)')
+    for graph in testdata:
+        x = graph.x.detach().numpy()
+        qt = ft_test.named_transformers_['num']
+        x_exp = np.zeros((len(x), len(all_featnames)))
+        x_exp[:,all_featnames.index('#scale(0)')] = x[:, scale_col]
+        x_exp[:,all_featnames.index('Mvir(10)')] = x[:, mass_col]
+        x_exp_t = qt.inverse_transform(x_exp) # transform back to original
+        x[:,scale_col] = x_exp_t[:,all_featnames.index('#scale(0)')]
+        x[:,mass_col] = x_exp_t[:,all_featnames.index('Mvir(10)')]
+        scales = np.unique(x[:,scale_col])
+        mass_cdf = [0]
+        for scale in scales:
+            halos_z = x[x[:,scale_col] == scale]
+            added = np.sum(halos_z[:,mass_col])
+            mass_cdf.append(mass_cdf[-1]+added)
+        mass_cdf = mass_cdf[1:]/np.max(mass_cdf)
+        z = 1/scales - 1
+        z_25 = z[np.where(mass_cdf > 0.25)[0][0]]
+        z_50 = z[np.where(mass_cdf > 0.5)[0][0]]
+        z_75 = z[np.where(mass_cdf > 0.75)[0][0]]
+        info = [len(x), z_25, z_50, z_75]
+        all_metrics.loc[len(all_metrics)] = info
+
+    pickle.dump(all_metrics, open(save_path, 'wb'))
+
+    return all_metrics
+
 
 # Change dtypes of first 25 cols (which probably by error are all strings)
 def change_dtypes(halos, featnames):
@@ -592,15 +724,15 @@ def downsize_tree3(tree, num, debug=False):
 
 
 ###################
-# Testing functions
+# Debuging functions
 ###################
 
-def prep_mstar(obscat_path, save_path):
+def prep_mstar(obscat_path, volname, save_path):
     
     # Load files for crossmatching to rstar IDs
-    crossmatchRSSF_path = '/mnt/sdceph/users/sgenel/IllustrisTNG/L75n1820TNG_DM/postprocessing/trees/rockstar/matches/rockstar_subhalo_matching_to_FP.hdf5'
+    crossmatchRSSF_path = f'/mnt/sdceph/users/sgenel/IllustrisTNG/{volname}_DM/postprocessing/trees/rockstar/matches/rockstar_subhalo_matching_to_FP.hdf5'
     cmRSSF_list = h5py.File(crossmatchRSSF_path, 'r')['Snapshot_99']['SubhaloIndexDarkRockstar_SubLink'][:]
-    rstar_path = '/mnt/sdceph/users/sgenel/IllustrisTNG/L75n1820TNG_DM/postprocessing/trees/rockstar/groups_099/fof_subhalo_tab_099.0.hdf5'
+    rstar_path = f'/mnt/sdceph/users/sgenel/IllustrisTNG/{volname}_DM/postprocessing/trees/rockstar/groups_099/fof_subhalo_tab_099.0.hdf5'
     rstar_subhalo_ids = np.array(h5py.File(rstar_path, 'r')['Subhalo']['Subhalo_ID'])
 
     # Load subfind data 
@@ -646,194 +778,207 @@ def prep_mhaloz0(ctrees_path, mstar_ids, save_path):
         pickle.dump(all_mhaloz0, f)
 
 
-###########
-# Graph plotting functions
-###########
-
-
-def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False):
-
-    ####
-    # Is k mass? That would seem like a good chance to color nodes by, and its what he has is colorbar titled
-    #   k=3 for christian's set, and if he made his set like mine (all cols except id cols), or with the defaul tcols, col 3 is Mvir
-    # But then why was he setting the di node attribute to have the name 'n_prog'? Just a typo?
-    # And for his paper figure he uses node size and color to represent mass
-    ####
-    
-    x = graph.x.numpy()
-    G = tg.utils.to_networkx(graph)
-
-    # posy=[]
-    # a_vals, counts = np.unique(x[:,scalecol], return_counts=True)
-    # for a in x[:,scalecol]:
-    #     posy.append(np.where(a==a_vals)[0][0]) 
-    posy = 106.667*x[:,scalecol] - 6.667
-
-    hpos = hierarchy_pos(G.reverse())
-    for p in hpos.keys():
-        hpos[p] = [hpos[p][0]*1.05, -posy[p]]
-
-    di = nx.betweenness_centrality(G)
-    featr = []
-    for q, key in enumerate(di.keys()):
-        feat = x[q][masscol] #feat = transformer[tkeys[k]].inverse_transform(graph.x.numpy()[q,k].reshape(-1, 1))[0][0]
-        featr.append(feat)
-        di[key] = feat
-    nx.set_node_attributes(G, di, 'Mvir') # just a typo that he was calling this n_prog??
-    labels = nx.get_node_attributes(G, 'Mvir') # dict of  "index: value" pairs 
-    masses = set(labels.values()) # just a typo that he was calling this progs??
-
-    mapping = dict(zip(sorted(masses),count())) # should be dict of   # sorted() sorts by first value (scale)
-    nodes = G.nodes()
-
-    #colors = [G.nodes[n]['Mvir'] for n in nodes] 
-    colors = [mapping[G.nodes[n]['Mvir']] for n in nodes]
-
-    # label_zpos = np.unique(1/x[:,scalecol] - 1) #  scale = 1/(1+z)    # np.unique(1/transformer[0].inverse_transform(feats[:,0].reshape(-1,1))-1)
-    label_ypos = np.linspace(0, -100, 20)
-    labels = np.round(0.11*label_ypos + 11) # 0.11*label_ypos - 11, 1)
-    rs = np.round(np.percentile(featr, np.linspace(0,100,8)),1)
-    ec = nx.draw_networkx_edges(G, hpos, alpha=0.9, width=0.5, arrows=False, ax=ax)
-    node_size = (x[:,masscol]-min(x[:,3])+1) # **1.2
-    nc = nx.draw_networkx_nodes(G, hpos, nodelist=nodes, node_color=colors, node_size=(node_size), cmap=plt.cm.jet, ax=ax)
-
-    if first:
-        ax.tick_params(left=True, bottom=False, labelleft=True, labelbottom=True)
-        ax.set(yticks = label_ypos) #ax.set(yticks=-np.linspace(0, max(zs), 100)[1::6]) #ax.set(yticks=-np.arange(len(zs))[1::6])
-        ax.set_yticklabels(labels) #ax.set_yticklabels(np.round(zs[:-1],1)[::-6])
-        ax.set(ylabel='Redshift')
-    if last:
-        if not first: ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=True)
-        cbar = fig.colorbar(nc, shrink=0.5, ax=ax)
-        cbar.ax.set_yticklabels(rs)
-        cbar.set_label(r'Halo mass [log($M_h/M_{\odot}$)]') # cbar.set_label('Redshift')
-    ax.set_xticks([])
-
-    return fig
-
-def hierarchy_pos(G, root=None, width=1., vert_gap = 0.2, vert_loc = 0, leaf_vs_root_factor = 0.5):
-
-    '''
-    If the graph is a tree this will return the positions to plot this in a 
-    hierarchical layout.
-    
-    Based on Joel's answer at https://stackoverflow.com/a/29597209/2966723,
-    but with some modifications.  
-
-    We include this because it may be useful for plotting transmission trees,
-    and there is currently no networkx equivalent (though it may be coming soon).
-    
-    There are two basic approaches we think of to allocate the horizontal 
-    location of a node.  
-    
-    - Top down: we allocate horizontal space to a node.  Then its ``k`` 
-      descendants split up that horizontal space equally.  This tends to result
-      in overlapping nodes when some have many descendants.
-    - Bottom up: we allocate horizontal space to each leaf node.  A node at a 
-      higher level gets the entire space allocated to its descendant leaves.
-      Based on this, leaf nodes at higher levels get the same space as leaf
-      nodes very deep in the tree.  
-      
-    We use use both of these approaches simultaneously with ``leaf_vs_root_factor`` 
-    determining how much of the horizontal space is based on the bottom up 
-    or top down approaches.  ``0`` gives pure bottom up, while 1 gives pure top
-    down.   
-    
-    
-    :Arguments: 
-    
-    **G** the graph (must be a tree)
-
-    **root** the root node of the tree 
-    - if the tree is directed and this is not given, the root will be found and used
-    - if the tree is directed and this is given, then the positions will be 
-      just for the descendants of this node.
-    - if the tree is undirected and not given, then a random choice will be used.
-
-    **width** horizontal space allocated for this branch - avoids overlap with other branches
-
-    **vert_gap** gap between levels of hierarchy
-
-    **vert_loc** vertical location of root
-    
-    **leaf_vs_root_factor**
-
-    xcenter: horizontal location of root
-    '''
-    if not nx.is_tree(G):
-        raise TypeError('cannot use hierarchy_pos on a graph that is not a tree')
-
-    if root is None:
-        if isinstance(G, nx.DiGraph):
-            root = next(iter(nx.topological_sort(G)))  #allows back compatibility with nx version 1.11
-        else:
-            root = random.choice(list(G.nodes))
-
-    def _hierarchy_pos(G, root, leftmost, width, leafdx = 0.2, vert_gap = 0.2, vert_loc = 0, 
-                    xcenter = 0.5, rootpos = None, 
-                    leafpos = None, parent = None):
-        '''
-        see hierarchy_pos docstring for most arguments
-
-        pos: a dict saying where all nodes go if they have been assigned
-        parent: parent of this branch. - only affects it if non-directed
-
-        '''
-
-        if rootpos is None:
-            rootpos = {root:(xcenter,vert_loc)}
-        else:
-            rootpos[root] = (xcenter, vert_loc)
-        if leafpos is None:
-            leafpos = {}
-        children = list(G.neighbors(root))
-        leaf_count = 0
-        if not isinstance(G, nx.DiGraph) and parent is not None:
-            children.remove(parent)  
-        if len(children)!=0:
-            rootdx = width/len(children)
-            nextx = xcenter - width/2 - rootdx/2
-            for child in children:
-                nextx += rootdx
-                rootpos, leafpos, newleaves = _hierarchy_pos(G,child, leftmost+leaf_count*leafdx, 
-                                    width=rootdx, leafdx=leafdx,
-                                    vert_gap = vert_gap, vert_loc = vert_loc-vert_gap, 
-                                    xcenter=nextx, rootpos=rootpos, leafpos=leafpos, parent = root)
-                leaf_count += newleaves
-
-            leftmostchild = min((x for x,y in [leafpos[child] for child in children]))
-            rightmostchild = max((x for x,y in [leafpos[child] for child in children]))
-            leafpos[root] = ((leftmostchild+rightmostchild)/2, vert_loc)
-        else:
-            leaf_count = 1
-            leafpos[root]  = (leftmost, vert_loc)
-#        pos[root] = (leftmost + (leaf_count-1)*dx/2., vert_loc)
-#        print(leaf_count)
-        return rootpos, leafpos, leaf_count
-
-    xcenter = width/2.
-    if isinstance(G, nx.DiGraph):
-        leafcount = len([node for node in nx.descendants(G, root) if G.out_degree(node)==0])
-    elif isinstance(G, nx.Graph):
-        leafcount = len([node for node in nx.node_connected_component(G, root) if G.degree(node)==1 and node != root])
-    rootpos, leafpos, leaf_count = _hierarchy_pos(G, root, 0, width, 
-                                                    leafdx=width*1./leafcount, 
-                                                    vert_gap=vert_gap, 
-                                                    vert_loc = vert_loc, 
-                                                    xcenter = xcenter)
-    pos = {}
-    for node in rootpos:
-        pos[node] = (leaf_vs_root_factor*leafpos[node][0] + (1-leaf_vs_root_factor)*rootpos[node][0], leafpos[node][1]) 
-#    pos = {node:(leaf_vs_root_factor*x1+(1-leaf_vs_root_factor)*x2, y1) for ((x1,y1), (x2,y2)) in (leafpos[node], rootpos[node]) for node in rootpos}
-    xmax = max(x for x,y in pos.values())
-    for node in pos:
-        pos[node]= (pos[node][0]*width/xmax, pos[node][1])
-    return pos
-
-
 class CPU_Unpickler(pickle.Unpickler):
     def find_class(self, module, name):
         if module == 'torch.storage' and name == '_load_from_bytes':
             return lambda b: torch.load(io.BytesIO(b), map_location='cpu')
         else:
             return super().find_class(module, name)
+
+def describe_dataset(datapath, dataset):
+          
+    data_meta = json.load(open(f'{datapath}{dataset}_meta.json', 'rb'))
+    obs_meta = data_meta[1]['obs meta']
+    tree_meta = data_meta[2]['tree meta']
+    print(f"Dataset: {dataset}")
+    print(f"Cuts: sizelim = {tree_meta['sizelim']}, Mlim = {tree_meta['Mlim']}, reslim = {obs_meta['reslim']}")
+    print(f"{obs_meta['tot galaxies']} total galaxies in phot catalog, {obs_meta['tot galaxies saved']} saved")
+    print(f"      {obs_meta['galaxies res cut']} too low res, {obs_meta['galaxies sat cut']} not central ")
+    print(f"{tree_meta['tot trees']} total trees in ctrees files, {tree_meta['tot trees saved']} saved")
+    print(f"      {tree_meta['trees mass cut']} with log(M) < {tree_meta['Mlim']}, {tree_meta['trees sat cut']} not central, {tree_meta['trees no mergers cut']} without mergers, {tree_meta['trees size cut']} with num halos > {tree_meta['sizelim']}")
+
+#############################
+# Loading data for train/test 
+#############################
+
+def create_subset(data_params, return_set): 
+    '''
+    Load data from pickle, transform, remove unwanted features and targets, and split into train and val or train and test
+    NOTE: For graph data like this need to apply fitted transformers to each graph individually (cant just stack like for images), but want to fit to train and val seperately
+          Cant think of a better way than looping through data twice (once to fit transformer, once to transform)
+          Chrisitan just used the same transfomer on train and test i think (probabaly ok if that transformer was just fitted on train or trainval?)
+    '''
+
+    # Use dataset meta file to see names of all feats and targs in dataset
+    data_path = data_params['data_path']
+    data_file = data_params['data_file']
+    data_meta_file = osp.expanduser(osp.join(data_path, data_file.replace('.pkl', '_meta.json')))
+    data_meta = json.load(open(data_meta_file, 'rb'))
+    all_labelnames = data_meta[1]['obs meta']['label_names'] 
+    all_featnames = data_meta[2]['tree meta']['featnames']
+
+    # Load dataset subset parameters 
+    use_targidxs = [all_labelnames.index(targ) for targ in data_params['use_targs']] # targets = data_params['targets']
+    use_featidxs = [all_featnames.index(f) for f in all_featnames if f in data_params['use_feats']] #  # have use_feats be names not idxs! in case we want to train on fewer features without recreating dataset
+    transfname = data_params['transf_name']
+    splits = data_params['splits']
+
+    # Load data from pickle
+    print(f'Dataset subset doesnt yet exist. Creating from {data_path}{data_file}', flush=True)
+    data = pickle.load(open(osp.expanduser(f'{data_path}/{data_file}'), 'rb'))
+
+    # Split into trainval and test
+    testidx_file = osp.expanduser(f'{data_path}{data_file.replace(".pkl", "")}_testidx{splits[2]}.npy')
+    if not os.path.exists(testidx_file): 
+        print(f'   Test indices for {splits[2]}% test set not yet saved for this dataset ({data_file}). Creating and saving in {testidx_file}', flush=True)
+        testidx = np.random.choice(np.linspace(0, len(data)-1, len(data), dtype=int), int(len(data)*(splits[2]/100)), replace=False)
+        np.save(testidx_file, testidx)
+    else: 
+        print(f'   Loading test indices from {testidx_file}', flush=True)
+        testidx = np.array(np.load(testidx_file))
+    test_data = []
+    trainval_data = [] 
+    for i, d in enumerate(data):
+        if i in testidx:
+            test_data.append(d)
+        else:
+            trainval_data.append(d)
+                
+    # Fit transformers to all trainval graph data and all test graph data. Note: Use all cols for transform 
+    if transfname != "None":
+        
+        traintransformer_path = osp.expanduser(f'{data_path}{data_file.replace(".pkl", "_"+transfname+"_train.pkl")}')
+        if not os.path.exists(traintransformer_path):
+            print(f'   Fitting transformer to train/val data (will save in {traintransformer_path})', flush=True)
+            ft_train = run_utils.fit_transformer(trainval_data, all_featnames, save_path=traintransformer_path, transfname=data_params['transf_name']) # maybe should do seperate for train/val too, but as long as not fitting on final test its probabaly ok
+        else: 
+            print(f'   Applying transformer to train/val data (loaded from {traintransformer_path})', flush=True)
+            ft_train = pickle.load(open(traintransformer_path, 'rb')) 
+        
+        testtransformer_path = osp.expanduser(f'{data_path}{data_file.replace(".pkl", "_"+transfname+"_test.pkl")}')
+        if not os.path.exists(testtransformer_path):
+            print(f'   Fitting transformer to test data (will save in {testtransformer_path})', flush=True)
+            ft_test = run_utils.fit_transformer(test_data, all_featnames, save_path=testtransformer_path, transfname=data_params['transf_name']) 
+        else: 
+            print(f'   Applying transformer to test data (loaded from {testtransformer_path})', flush=True)
+            ft_test = pickle.load(open(testtransformer_path, 'rb')) 
+
+    # Transform each graph, and remove unwanted features and targets
+    print(f"   Selecting desired features {data_params['use_feats']} and targets {data_params['use_targs']}", flush=True)
+    trainval_out = []
+    test_out = []
+    test_z0x_all = []
+    for graph in trainval_data:
+        x = graph.x
+        if transfname != "None": 
+            x = ft_train.transform(graph.x)
+        x = torch.tensor(x[:, use_featidxs])
+        trainval_out.append(Data(x=x, edge_index=graph.edge_index, edge_attr=graph.edge_attr, y=graph.y[use_targidxs]))
+    for graph in test_data:
+        x = graph.x
+        test_z0x_all.append(x[0]) # add all feats from final halo
+        if transfname != "None": 
+            x = ft_test.transform(x)
+        x = torch.tensor(x[:, use_featidxs])
+        test_out.append(Data(x=x, edge_index=graph.edge_index, edge_attr=graph.edge_attr, y=graph.y[use_targidxs]))
+
+    # Split trainval into train and val
+    print(f"   Splitting train/val into train and val", flush=True)
+    val_pct = splits[1]/(splits[0]+splits[1]) # pct of train
+    train_out = trainval_out[:int(len(trainval_out)*(1-val_pct))]
+    val_out = trainval_out[int(len(trainval_out)*(val_pct)):]
+
+    # Save (seperately for train and test to aviod any mistakes!)
+    tag = f"_{use_featidxs}_{use_targidxs}_{transfname}_{splits}"
+    train_path = osp.expanduser(f'{data_path}{data_file.replace(".pkl", tag)}_train.pkl')
+    test_path = osp.expanduser(f'{data_path}{data_file.replace(".pkl", tag)}_test.pkl')
+    print(f"   Saving train+val sub-dataset as {train_path}", flush=True)
+    print(f"   Saving test sub-dataset as {test_path}", flush=True)
+    pickle.dump((train_out, val_out), open(train_path, 'wb'))
+    pickle.dump((test_out, test_z0x_all), open(test_path, 'wb')) # also saving z0 feats for all test halos, for future exploration
+
+    # If "test" run return train+val and test (NOTE: Christian uses 'test' to mean training the same model again completely from scratch on train+val, then testing on test)
+    if return_set == "test":
+        return trainval_out, test_out, test_z0x_all 
+    if return_set == 'train':
+        return train_out, val_out 
+    
+def get_subset_path(data_params, set):
+
+    # Get subset parameters
+    data_path = data_params['data_path']
+    data_file = data_params['data_file']
+    data_meta_file = osp.expanduser(osp.join(data_path, data_file.replace('.pkl', '_meta.json')))
+    data_meta = json.load(open(data_meta_file, 'rb'))
+    all_label_names = data_meta[1]['obs meta']['label_names'] 
+    all_featnames = data_meta[2]['tree meta']['featnames']
+    use_targidxs = [all_label_names.index(targ) for targ in data_params['use_targs']] # targets = data_params['targets']
+    use_featidxs = [all_featnames.index(f) for f in all_featnames if f in data_params['use_feats']] #  # have use_feats be names not idxs! in case we want to train on fewer features without recreating dataset
+    transfname = data_params['transf_name']
+    splits = data_params['splits']
+    tag = f"_{use_featidxs}_{use_targidxs}_{transfname}_{splits}"
+
+    # Return train or test path
+    if set =='test':
+        return osp.expanduser(f'{data_path}{data_file.replace(".pkl", tag)}_test.pkl')  
+    else:
+        return osp.expanduser(f'{data_path}{data_file.replace(".pkl", tag)}_train.pkl')  
+
+
+
+#############################
+# For just final halos model
+#############################
+    
+# Define Data class for ease of access 
+class SimpleData(Dataset_notgeom):
+
+  def __init__(self, X, Y):
+    self.X = X
+    self.y = Y
+    self.len = len(X)
+  
+  def __getitem__(self, index):
+    return self.X[index], self.y[index]
+  
+  def __len__(self):
+    return self.len
+
+def data_finalhalos(allgraphs, use_featidxs, use_targidxs, ft_train): 
+    
+    X = []; Y = []
+    for graph in allgraphs:
+        x = np.expand_dims(graph.x[0].detach().numpy(), axis=0)
+        x = ft_train.transform(x).squeeze()
+        X.append(x[use_featidxs].astype(np.float32))
+        Y.append(graph.y[use_targidxs].detach().numpy().astype(np.float32))
+    X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.33, random_state=42)
+    traindata = SimpleData(X_train, Y_train)
+    testdata = SimpleData(X_test, Y_test)
+  
+    return traindata, testdata
+
+def data_fake(n=20000): 
+    
+    X = []; Y = []
+    for i in range(n):
+        x = np.random.rand(5)
+        X.append(x.astype(np.float32))
+        Y.append(np.array([np.mean(x)+np.random.randint(-100, 100)/10000, np.std(x)+np.random.randint(-100, 100)/10000]).astype(np.float32))
+    X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.33, random_state=42)
+    traindata = SimpleData(X_train, Y_train)
+    testdata = SimpleData(X_test, Y_test)
+  
+    return traindata, testdata
+
+def propsdata_finalhalos(props_data, use_featidxs, use_targidxs):
+
+    X = []; Y = []
+    for graph in props_data:
+        X.append(graph.x[0].detach().numpy()[use_featidxs].astype(np.float32))
+        Y.append(graph.y[use_targidxs].detach().numpy().astype(np.float32))
+    X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.33, random_state=42)
+    traindata = SimpleData(X_train, Y_train)
+    testdata = SimpleData(X_test, Y_test)
+  
+    return traindata, testdata

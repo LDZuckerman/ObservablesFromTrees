@@ -14,9 +14,8 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 import sys
 sys.path.insert(0, 'ObservablesFromTrees/dev/')
-from dev import run_utils
+from dev import run_utils, data_utils, models
 import json
-
 
 
 def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id, gpu): # "train_model"
@@ -33,7 +32,9 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
     
     # Get loss function 
     if run_params['seed']: torch.manual_seed(42)
-    loss_func = get_loss_func(run_params['loss_func'])
+    loss_func = run_utils.get_loss_func(run_params['loss_func'])
+    get_var = True if loss_func in ["Gauss1d", "Gauss2d", "GaussNd", "Gauss2d_corr", "Gauss4d_corr"] else False
+    get_rho = True if loss_func in ["Gauss2d_corr", "Gauss4d_corr"] else False 
     
     # Set learning rate and schedular
     lr_init = learn_params['learning_rate'] # If no warmup (e.g. if schedule = onecycle, initial learning rate should be max learning rate)
@@ -41,9 +42,16 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
         lr_init = lr_init/(learn_params['g_up'])**(learn_params['warmup']) # If warmup, adjust initial learning rate
     lr_scheduler = get_lr_schedule(schedule  = learn_params['schedule']) 
 
+    # Create subset dataset (dataset with feat/targ selections applied, transform applied, and split into train and test)
+    subset_path = data_utils.get_subset_path(data_params, set = 'train')
+    if not osp.exists(f'{subset_path}'):
+        train_data, val_data = data_utils.create_subset(data_params, return_set = 'train') 
+    else:
+        print(f"Dataset subset already exists. Loading from {subset_path}", flush=True)
+        train_data, val_data = pickle.load(open(subset_path, 'rb'))
+
     # Load data and add num in/out channels to hyper_params
     targ_names = data_params['use_targs'] 
-    train_data, val_data = load_data(data_params) # REALLY TEST_DATA IF TEST=1 IN JSON!!!
     n_targ = len(train_data[0].y)
     if len(train_data[0].y) != len(targ_names): raise ValueError(f"Number of targets in data ({len(train_data[0].y)}) does not match number of targets in data_params ({len(targ_names)})")
     if train_data[0].x.numpy().shape[1] != len(data_params['use_feats']): raise ValueError(f"Number of features in data ({train_data[0].x.numpy().shape[1]}) does not match number of features in data_params ({len(data_params['use_feats'])})")
@@ -53,20 +61,10 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
 
     # Initialize evaluation metrics 
     # metric = get_metrics(run_params['metrics']) # FOR NOW JUST USE SCATTER SIGMA 
-    ###
-    # BUT WHAT IS ACC VS SIGMA THEN? CHRISTIAN WAS STD AS METRIC, BUT THEN WAS ALSO ADDING METRIC TO ACCS
-    #  When metric is test_mutli_varrho, the thing it returns is std(ys-preds).
-    #  He appends this to acc, but also prints it as scatter.
-    #  And then after the final testing on val, the scatter he adds to the result dict is the same thing (std(ys-preds))
-    #  So why is he storing both accs and metrics?
-    #  And why is he calling it acc when YOU CANT REALLY DEFINE ACCURACY FOR REGREESION, and anyway, acc is generally higher = better, but scatter is lower = better (more like an error metric)?
-    #  And why use std of errors as metric to define best model? why not use some actual error metric like rmse?
-    #  Maybe ill just change everything called acc to metric as and it will be sigma (scatter), and then save rmse as rmse. Nothing called acc to aviod confusion. 
-    ###
     performance_plot = get_performance_plot(run_params['performance_plot'])
     # tr_accs_alltrials, va_accs_alltrials, scatter_alltrials, = [], [], [] # lists in case n_trials > 1  # REALLY TEST_ACCS IF TEST IF TEST=1 IN JSON
     # preds_alltrials, lowest_alltrials = [], [] # lists in case n_trials > 1 
-    
+    s
     ############### LOOP THROUGH TRIALS ###################
     
     # Perform experiment (either once or n_trials times)
@@ -87,7 +85,7 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
             writer=SummaryWriter(log_dir=log_dir_n)
         
         # Initialize model, dataloaders, scheduler, and optimizer
-        model = setup_model(run_params['model'], hyper_params) # print(f"N_params: {sum(p.numel() for p in model.parameters())}", flush=True)
+        model = run_utils.get_model(run_params['model'], hyper_params) # print(f"N_params: {sum(p.numel() for p in model.parameters())}", flush=True)
         train_loader = DataLoader(train_data, batch_size=run_params['batch_size'], shuffle=True, num_workers=run_params['num_workers']) #shuffle training
         optimizer = torch.optim.Adam(model.parameters(), lr=lr_init)
         scheduler = lr_scheduler(optimizer, **learn_params, total_steps=n_epochs*len(train_loader))
@@ -137,8 +135,8 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
             if (epoch+1)%val_epoch == 0: 
                 
                 # Perform validation   #train_metric, val_metric, lowest_metric, low_ys, low_pred, k, early_stop = get_val_results(model, run_params, data_params, train_loader, val_loader, optimizer, epoch, metric, k, lowest_metric, save, val_epoch, early_stop, n_targ, low_ys, low_pred, out_dir_n)
-                tr_ys, tr_pred = test(train_loader, model, n_targ, run_params['loss_func'], get_varrho=False)
-                va_ys, va_pred = test(val_loader, model, n_targ, run_params['loss_func'], get_varrho=False)
+                tr_ys, tr_pred, _ = run_utils.test(train_loader, model, n_targ, run_params['loss_func'], get_var, get_rho)
+                va_ys, va_pred, _ = run_utils.test(val_loader, model, n_targ, run_params['loss_func'], get_var, get_rho)
                 train_metric = np.std(tr_pred - tr_ys, axis=0) # sigma for each targ  # metric(tr_ys, tr_pred)
                 val_metric = np.std(va_pred - va_ys, axis=0) # sigma for each targ  # metric(va_ys, va_pred)  # REALLY TEST_METRIC IF TEST=1 IN JSON!!!
                 train_rmse =  np.sqrt(np.mean((tr_ys-tr_pred)**2, axis=0)) # RMSE for each targ
@@ -199,10 +197,11 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
 
         print(f"\nTRAINING COMPLETE{s} (total {spent:.2f} sec, {spent/epochexit:.3f} sec/epoch, {len(train_loader.dataset)*epochexit/spent:.0f} trees/sec)\n", flush=True)
           
-        ###################### "TEST" ON VAL AND, RESULTS TO LISTS, PLOT #########################
+        ###################### LOAD IN BEST MODEL, "TEST" ON VAL AND, RESULTS TO LISTS, PLOT #########################
         
         # Perform testing -> doing it again instead of using last val metrics just becasue perhaps last few training epochs werent done before last val epoch (depends on val_epoch and n_epochs)
-        ys, pred, vars, rhos = test(val_loader, model, n_targ, run_params['loss_func'], get_varrho=True)
+        model.load_state_dict(torch.load(osp.join(out_dir_n,'model_best.pt')))
+        ys, pred, _ = run_utils.test(val_loader, model, n_targ, run_params['loss_func'], get_var, get_rho)
         if run_params['save_plots']:
             # WHY DID HE HAVE THIS TWICE ys, pred, xs, Mh, vars, rhos = test(val_loader, model, data_params["targets"], run_params['loss_func'], data_params["scale"]) # WAS CALLING VAL_SCATTER TEST_SCATTER BUT ITS ONLY TEST IF TEST=1 IN JSON!!!
             figs = performance_plot(ys, pred, targ_names)
@@ -263,100 +262,16 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
         #     pickle.dump(construct_dict, handle)
         
     print(f'\nFINISHED ALL TRIALS', flush=True)
-
-
-def load_data(data_params): 
-    '''
-    Load data from pickle, transform, remove unwanted features and targets, and split into train and val or train and test
-    NOTE: For graph data like this need to apply fitted transformers to each graph individually (cant just stack like for images), but want to fit to train and val seperately
-          Cant think of a better way than looping through data twice (once to fit transformer, once to transform)
-          Chrisitan just used the same transfomer on train and test i think (probabaly ok if that transformer was just fitted on train or trainval?)
-    '''
-
-    # Load data from pickle
-    data_path = data_params['data_path']
-    data_file = data_params['data_file']
-    print(f'Loading data from {data_path}{data_file}', flush=True)
-    data = pickle.load(open(osp.expanduser(f'{data_path}/{data_file}'), 'rb'))
-
-    # Split into train and val or train and test
-    splits = data_params['splits']
-    testidx_file = osp.expanduser(f'{data_path}{data_file.replace(".pkl", "")}_testidx{splits[2]}.npy')
-    if not os.path.exists(testidx_file): 
-        print(f'   Test indices for {splits[2]}% test set not yet saved for this dataset ({data_file}). Creating and saving in {testidx_file}', flush=True)
-        testidx = np.random.choice(np.linspace(0, len(data)-1, len(data), dtype=int), int(len(data)*(splits[2]/100)), replace=False)
-        np.save(testidx_file, testidx)
-    else: 
-        print(f'   Loading test indices from {testidx_file}', flush=True)
-        testidx = np.array(np.load(testidx_file))
-    test_data = []
-    trainval_data = [] 
-    for i, d in enumerate(data):
-        if i in testidx:
-            test_data.append(d)
-        else:
-            trainval_data.append(d)
-
-    # Use dataset meta file to see names of all feats and targs in dataset
-    data_meta_file = osp.expanduser(osp.join(data_path, data_file.replace('.pkl', '_meta.json')))
-    data_meta = json.load(open(data_meta_file, 'rb'))
-    all_label_names = data_meta[0]['obs meta']['label_names'] 
-    all_featnames = data_meta[1]['tree meta']['featnames']
-                
-    # Fit transformers to all trainval graph data and all test graph data. Note: Use all cols for transform 
-    transfname = data_params['transf_name']
-    if transfname != "None":
-        traintransformer_path = osp.expanduser(f'{data_path}{data_file.replace(".pkl", "_"+transfname+"_train.pkl")}')
-        if not os.path.exists(traintransformer_path):
-            print(f'   Fitting transformer to train/val data (will save in {traintransformer_path})', flush=True)
-            ft_train = run_utils.fit_transformer(trainval_data, all_featnames, save_path=traintransformer_path, transfname=data_params['transf_name']) # maybe should do seperate for train/val too, but as long as not fitting on final test its probabaly ok
-        else: 
-            print(f'   Applying transformer to train/val data (loaded from {traintransformer_path})', flush=True)
-            ft_train = pickle.load(open(traintransformer_path, 'rb')) 
-        testtransformer_path = osp.expanduser(f'{data_path}{data_file.replace(".pkl", "_"+transfname+"_test.pkl")}')
-        if not os.path.exists(testtransformer_path):
-            print(f'   Fitting transformer to test data (will save in {traintransformer_path})', flush=True)
-            ft_test = run_utils.fit_transformer(trainval_data, all_featnames, save_path=testtransformer_path, transfname=data_params['transf_name']) 
-        else: 
-            print(f'   Applying transformer to test data (loaded from {traintransformer_path})', flush=True)
-            ft_test = pickle.load(open(testtransformer_path, 'rb')) 
-
-    # Transform each graph, and remove unwanted features and targets. 
-    print(f"   Selecting desired features {data_params['use_feats']} and targets {data_params['use_targs']}", flush=True)
-    usetarg_idxs = [all_label_names.index(targ) for targ in data_params['use_targs']] # targets = data_params['targets']
-    use_featidxs = [all_featnames.index(f) for f in all_featnames if f in data_params['use_feats']] #  # have use_feats be names not idxs! in case we want to train on fewer features without recreating dataset
-    trainval_out = []
-    for graph in trainval_data:
-        x = graph.x
-        if transfname != "None": 
-            x = ft_train.transform(graph.x)
-        x = torch.tensor(x[:, use_featidxs])
-        trainval_out.append(Data(x=x, edge_index=graph.edge_index, edge_attr=graph.edge_attr, y=graph.y[usetarg_idxs]))
-    test_out = []
-    for graph in test_data:
-        x = graph.x
-        if transfname != "None": 
-            x = ft_test.transform(x)
-        x = torch.tensor(x[:, use_featidxs])
-        test_out.append(Data(x=x, edge_index=graph.edge_index, edge_attr=graph.edge_attr, y=graph.y[usetarg_idxs]))
-
-    # If "test" run return train+val and test (NOTE: Christian uses 'test' to mean training the same model again completely from scratch on train+val, then testing on test)
-    if data_params['test']:
-
-        return trainval_out, test_out # merged train+val, test
-   
-   # If "train" run, fit or load transformer and split into train and val
-    else:
-        val_pct = splits[1]/(splits[0]+splits[1]) # pct of train
-        train_out = trainval_out[:int(len(trainval_out)*(1-val_pct))]
-        val_out = trainval_out[int(len(trainval_out)*(val_pct)):]
-        
-        return train_out, val_out 
     
 
 def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_func, accelerator, optimizer, scheduler):
     '''
     Train for one epoch
+    NOTE: When using uncorrelated guassian loss funcs, model returns 
+            var = predicted variances (aka sig)
+         When using correlated guassion loss funcs, model returns
+            var = predicted variances (aka sig)
+            rho = 
     '''
     
     model.train()
@@ -432,37 +347,6 @@ def print_results_and_log(run_params, log, writer, epoch, lr_curr, trainloss, er
     print(f'\tMedian metric (scatter) for last 10 val epochs: {np.round(last10val,4)} ({counter} epochs since last improvement)', flush=True)
     
     return
-  
-
-def test(loader, model, n_targ, l_func, get_varrho = False):
-    '''
-    Returns targets and predictions
-    '''
-    ys, pred, vars, rhos = [],[], [], []
-    model.eval()
-    with torch.no_grad():
-        for data in loader: 
-            rho = torch.IntTensor(0)
-            var = torch.IntTensor(0)
-            if l_func in ["L1", "L2", "SmoothL1"]: 
-                out = model(data)  
-            if l_func in ["Gauss1d", "Gauss2d", "GaussNd"]:
-                out, var = model(data)  
-            if l_func in ["Gauss2d_corr", "Gauss4d_corr"]:
-                out, var, rho = model(data) 
-            ys.append(data.y.view(-1,n_targ))
-            pred.append(out)
-            vars.append(var)
-            rhos.append(rho)
-    ys = torch.vstack(ys)
-    pred = torch.vstack(pred)
-    vars = torch.vstack(vars)
-    rhos = torch.vstack(rhos)
-
-    if get_varrho:
-        return ys.cpu().numpy(), pred.cpu().numpy(), vars, rhos   
-    else:
-        return ys.cpu().numpy(), pred.cpu().numpy()
     
 
 def get_metrics(metric_name):
@@ -475,20 +359,6 @@ def get_metrics(metric_name):
     return metrics
 
 
-def get_loss_func(name):
-    '''
-    Load loss function from loss_funcs file
-    '''
-
-    import dev.loss_funcs as loss_func_module
-    loss_func = getattr(loss_func_module, name)
-    try:
-        l=loss_func()
-    except:
-        l=loss_func
-
-    return l
-
 def get_performance_plot(name):
     '''
     Load plotting function from plot_utils file
@@ -498,17 +368,6 @@ def get_performance_plot(name):
     performance_plot = getattr(evals, name)
 
     return performance_plot 
-
-def setup_model(model_name, hyper_params):
-    '''
-    Load model object from model folder
-    '''
-
-    import dev.models as models
-    model = getattr(models, model_name)
-    model = model(**hyper_params)
-
-    return model
 
 def get_lr_schedule(schedule):
     '''
