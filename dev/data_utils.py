@@ -293,7 +293,7 @@ def collect_othertargs(obscat_path, alltrees, volname, save_path, reslim=100):
     galaxies_sat_cut = len(sh_res) - len(ctl_idxs) # for checking that the same cuts are being applied as in prep_phot
     print(f'\tTotal of {len(sh_res)} subhalos, with {len(ctl_idxs)} being central', flush=True)  
 
-    # Add photometry for all central subhalos to dict
+    # Add photometry for all central subhalos to dict [analogous to prep_phot]
     all_targs =  pd.DataFrame(columns=['rstar_id']+list(to_store.keys()))
     galaxies_res_cut = 0 # for checking that the same cuts are being applied as in prep_phot
     galaxies_saved = 0 # for checking that the same cuts are being applied as in prep_phot
@@ -317,7 +317,7 @@ def collect_othertargs(obscat_path, alltrees, volname, save_path, reslim=100):
         # Add list to DF
         all_targs.loc[len(all_targs)] = info
 
-    # Collect just the galaxies that are in the stored trees
+    # Collect just the galaxies that are in the stored trees [analogous to make_graphs]
     all_targs_out = pd.DataFrame(columns = all_targs.columns)
     for rstar_id in list(alltrees.keys()):
        all_targs_out.loc[len(all_targs_out)] = all_targs[all_targs['rstar_id'] == rstar_id].iloc[0]
@@ -790,12 +790,13 @@ def describe_dataset(datapath, dataset):
     data_meta = json.load(open(f'{datapath}{dataset}_meta.json', 'rb'))
     obs_meta = data_meta[1]['obs meta']
     tree_meta = data_meta[2]['tree meta']
-    print(f"Dataset: {dataset}")
-    print(f"Cuts: sizelim = {tree_meta['sizelim']}, Mlim = {tree_meta['Mlim']}, reslim = {obs_meta['reslim']}")
-    print(f"{obs_meta['tot galaxies']} total galaxies in phot catalog, {obs_meta['tot galaxies saved']} saved")
-    print(f"      {obs_meta['galaxies res cut']} too low res, {obs_meta['galaxies sat cut']} not central ")
-    print(f"{tree_meta['tot trees']} total trees in ctrees files, {tree_meta['tot trees saved']} saved")
-    print(f"      {tree_meta['trees mass cut']} with log(M) < {tree_meta['Mlim']}, {tree_meta['trees sat cut']} not central, {tree_meta['trees no mergers cut']} without mergers, {tree_meta['trees size cut']} with num halos > {tree_meta['sizelim']}")
+    print(f"Dataset {dataset}")
+    print(f"   Volume: {data_meta[0]['set meta']['Volume']}")
+    print(f"   Cuts: sizelim = {tree_meta['sizelim']}, Mlim = {tree_meta['Mlim']}, reslim = {obs_meta['reslim']}")
+    print(f"   {obs_meta['tot galaxies']} total galaxies in phot catalog, {obs_meta['tot galaxies saved']} saved")
+    print(f"        {obs_meta['galaxies res cut']} too low res, {obs_meta['galaxies sat cut']} not central ")
+    print(f"   {tree_meta['tot trees']} total trees in ctrees files, {tree_meta['tot trees saved']} saved")
+    print(f"        {tree_meta['trees mass cut']} with log(M) < {tree_meta['Mlim']}, {tree_meta['trees sat cut']} not central, {tree_meta['trees no mergers cut']} without mergers, {tree_meta['trees size cut']} with num halos > {tree_meta['sizelim']}")
 
 #############################
 # Loading data for train/test 
