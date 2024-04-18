@@ -10,7 +10,21 @@ import scipy.stats as stats
 import pickle, json
 import os.path as osp
 from sklearn.semi_supervised import LabelSpreading
-from sympy import Predicate
+from sympy import Predicate, plot
+
+def get_yhats(preds, sample=False):
+
+    if len(preds) == 2: 
+        muhats = preds[0]
+        if sample:
+            sigmahats = preds[1]
+            yhats = np.random.normal(muhats, sigmahats)
+        else: 
+            yhats = muhats
+    else: 
+        yhats = preds
+
+    return yhats
 
 def multi_base(ys, pred, targets):
     ''' 
@@ -105,37 +119,22 @@ def plot_preds_compare(ys, preds, sm_ys, sm_preds, targs):
 
     return fig
 
-def plot_phot_preds(ys, preds, labels, unit, name):
+def plot_phot_preds(ys, preds, labels, unit, name, sample=False):
 
-    Fr = [0.79, -0.09, -0.02, -0.40, 8.9e-5, 8.8e-5, 8.7e-5, 8.28e-5] # SDSS U, B,V, in erg/s/cm²/Å. approx u, g, r, i, z conversions from nano-maggies
     l1, l2 = -25, -12
     u = '[mag]'
     if unit == 'erg/s/cm²/Å':
         l1, l2 = -10, -5
         u = r'log($f_{\lambda}$) [erg/s/cm²/Å]'
+    yhats = get_yhats(preds, sample)
     fig, axs = plt.subplots(2, 4, figsize=(15, 7), sharex=True, sharey=True)
     plt.xticks(np.arange(l1, l2, 1))
     plt.yticks(np.arange(l1, l2, 1))
     for i in range(2):
         for j in range(4):
             idx = 4*i+j
-            pred = preds[:,idx] 
-            y = ys[:,idx]   
-            if unit == 'erg/s/cm²/Å':
-                y = (y - Fr[idx])/2.5 # 10**((y - Fr[idx])/2.5)
-                pred = (pred - Fr[idx])/2.5 # 10**((pred - Fr[idx])/2.5)
-            #vals, x_pos, y_pos, hist = axs[i,j].hist2d(pred, y, bins=50, range=[np.percentile(np.hstack([pred,y]), [0,100]), np.percentile(np.hstack([pred,y]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis)
-            vals, x_pos, y_pos, hist = axs[i,j].hist2d(y, pred, bins=50, range=[np.percentile(np.hstack([y,pred]), [0,100]), np.percentile(np.hstack([y,pred]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis)
-            X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
-            axs[i,j].contour(X,Y, np.log(vals.T+1), levels=4, linewidths=0.75, colors='white')
-            axs[i,j].plot([l1,l2],[l1,l2], 'k--', label='Perfect correspondance')
-            axs[i,j].text(0.1, 0.9, f'{labels[idx]} band', fontsize=8, transform=axs[i,j].transAxes, weight='bold')
-            axs[i,j].text(0.6, 0.2, f'rmse: {np.round(float(np.std(pred-y)),3)}', fontsize=8, transform=axs[i,j].transAxes)
-            rho = stats.pearsonr(y, pred).statistic # = np.cov(np.stack((y, pred), axis=0))/(np.std(y)*np.std(pred)) # pearson r
-            axs[i,j].text(0.6, 0.15, f'pearson r: {np.round(float(rho),3)}', fontsize=8, transform=axs[i,j].transAxes)
-            axs[i,j].set_xlim(l1, l2)
-            axs[i,j].set_ylim(l1, l2)
-        
+            plot_phot(axs[i,j], yhats, ys, idx, labels, unit, l1, l2)  
+    if sample: axs[0, -1].text(0.5, 0.85, 'NOTE: all data sampled from \npredicted distributions', fontsize=6, transform=axs[0, -1].transAxes)
     fig.supxlabel(f'Hydro Truth {u}')
     fig.supylabel(f'Model Prediction {u}')
     fig.suptitle(name)
@@ -144,9 +143,9 @@ def plot_phot_preds(ys, preds, labels, unit, name):
 
     return fig
 
-def plot_phot_preds_compare(taskdir, models, unit = 'erg/s/cm²/Å'):
 
-    Fr = [0.79, -0.09, -0.02, -0.40, 8.9e-5, 8.8e-5, 8.7e-5, 8.28e-5] # SDSS U, B, V, in erg/s/cm²/Å. approx u, g, r, i, z conversions from nano-maggies
+def plot_phot_preds_compare(taskdir, models, unit = 'erg/s/cm²/Å', sample=False):
+
     l1, l2 = -25, -12
     rmse_min = 0.5; rmse_max = 1.3
     u = '[mag]'
@@ -156,45 +155,21 @@ def plot_phot_preds_compare(taskdir, models, unit = 'erg/s/cm²/Å'):
         rmse_min = 0.21; rmse_max = 0.38
         u = r'log($f_{\lambda}$) [erg/s/cm²/Å]'
         ticks = np.arange(l1, l2, 1)
-
     fig, axs = plt.subplots(8, len(models), figsize=(4*len(models), 8*2.5), sharex=True, sharey=True)
     textcmap = truncate_colormap(cm.get_cmap('hot'), 0, 0.3) #truncate_colormap(cm.get_cmap('ocean'), 0, 0.2)
     plt.xticks(ticks)
     plt.yticks(ticks)
     for j in range(len(models)):
-        if 'MLP' in models[j]:
-            resfile = f'{taskdir}/MLP/{models[j]}_testres.pkl'
-            configfile = f'{taskdir}/MLP/{models[j]}_config.json'
-            modelname = models[j]
-        else: 
-            resfile = f'{taskdir}/{models[j]}/testres.pkl'
-            configfile = f'{taskdir}/{models[j]}/expfile.json'
-            modelname = f'GNN {models[j][:4]}'
+        resfile = f'{taskdir}/MLP/{models[j]}_testres.pkl' if 'MLP' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
+        configfile = f'{taskdir}/MLP/{models[j]}_config.json' if 'MLP' in models[j] else f'{taskdir}/{models[j]}/expfile.json'
+        modelname = models[j] if 'MLP' in models[j] else f'GNN {models[j]}'
         ys, preds, _ = pickle.load(open(resfile, 'rb'))
         labels = json.load(open(configfile, 'rb'))['data_params']['use_targs']
-        if len(preds) == 2: 
-            yhats = preds[0]
-        else: 
-            yhats = preds
+        yhats = get_yhats(preds, sample)
         for i in range(len(labels)):
-            y = ys[:,i]; 
-            yhat = yhats[:,i]
-            if unit == 'erg/s/cm²/Å':
-                y = (y - Fr[i])/2.5; yhat = (yhat - Fr[i])/2.5
-            vals, x_pos, y_pos, hist = axs[i,j].hist2d(y, yhat, bins=50, range=[np.percentile(np.hstack([y,yhat]), [0,100]), np.percentile(np.hstack([y,yhat]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis)
-            X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
-            axs[i,j].contour(X,Y, np.log(vals.T+1), levels=4, linewidths=0.75, colors='white')
-            axs[i,j].plot([l1,l2],[l1,l2], 'k--', label='Perfect correspondance')
-            axs[i,j].text(0.1, 0.9, f'{labels[i]} band', fontsize=8, transform=axs[i,j].transAxes, weight='bold')
-            rmse = np.round(float(np.std(yhat-y)),3)
-            rmse_color = textcmap(1-(rmse-rmse_min)/(rmse_max-rmse_min))
-            axs[i,j].text(0.6, 0.15, f'rmse: {rmse}', fontsize=10, transform=axs[i,j].transAxes, color=rmse_color)
-            rho = np.round(float(stats.pearsonr(y, yhat).statistic ),3) # = np.cov(np.stack((y, yhat, axis=0))/(np.std(y)*np.std(yhat)) # pearson r
-            rho_color = textcmap((rho-0.9)/(0.95-0.9))
-            axs[i,j].text(0.6, 0.2, f'pearson r: {rho}', fontsize=10, transform=axs[i,j].transAxes, color=rho_color)
-            axs[i,j].set_xlim(l1, l2)
-            axs[i,j].set_ylim(l1, l2)
+            plot_phot(axs[i,j], yhats, ys, i, labels, unit, l1, l2, textcmap, rmse_min, rmse_max)  
         axs[0,j].set_title(f'{modelname}', fontsize=10)
+        if sample and len(preds)==2: axs[0, -1].text(0.5, 0.85, 'NOTE: data for this model sampled\nfrom predicted distributions', fontsize=6, transform=axs[0, -1].transAxes)
 
     fig.supxlabel(f'Hydro Truth {u}')
     fig.supylabel(f'Model Prediction {u}')
@@ -203,7 +178,59 @@ def plot_phot_preds_compare(taskdir, models, unit = 'erg/s/cm²/Å'):
 
     return fig
 
-def plot_phot_err(ys, preds, labels, unit, name):
+
+def plot_phot(ax, yhats, ys, idx, labels, unit, l1, l2, textcmap=None, rmse_min=None, rmse_max=None):
+
+    Fr = [0.79, -0.09, -0.02, -0.40, 8.9e-5, 8.8e-5, 8.7e-5, 8.28e-5] # SDSS U, B,V, in erg/s/cm²/Å. approx u, g, r, i, z conversions from nano-maggies
+    yhat = yhats[:,idx] 
+    y = ys[:,idx]   
+    if unit == 'erg/s/cm²/Å':
+        y = (y - Fr[idx])/2.5 # 10**((y - Fr[idx])/2.5)
+        yhat = (yhat - Fr[idx])/2.5 # 10**((pred - Fr[idx])/2.5)
+    vals, x_pos, y_pos, hist = ax.hist2d(y, yhat, bins=50, range=[np.percentile(np.hstack([y,yhat]), [0,100]), np.percentile(np.hstack([y,yhat]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis)
+    X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
+    ax.contour(X,Y, np.log(vals.T+1), levels=4, linewidths=0.75, colors='white')
+    ax.plot([l1,l2],[l1,l2], 'k--', label='Perfect correspondance')
+    ax.text(0.1, 0.9, f'{labels[idx]} band', fontsize=8, transform=ax.transAxes, weight='bold')
+    rmse = np.round(float(np.std(yhat-y)),3)
+    rmse_color = textcmap(1-(rmse-rmse_min)/(rmse_max-rmse_min)) if textcmap is not None else 'black'
+    ax.text(0.6, 0.15, f'rmse: {rmse}', fontsize=10, transform=ax.transAxes, color=rmse_color)
+    rho = np.round(float(stats.pearsonr(y, yhat).statistic ),3) # = np.cov(np.stack((y, yhat, axis=0))/(np.std(y)*np.std(yhat)) # pearson r
+    rho_color = textcmap((rho-0.9)/(0.95-0.9)) if textcmap is not None else 'black'
+    ax.text(0.6, 0.2, f'pearson r: {rho}', fontsize=10, transform=ax.transAxes, color=rho_color)
+    ax.set_xlim(l1, l2)
+    ax.set_ylim(l1, l2)
+
+    return ax
+
+
+def plot_UVr_compare(taskdir, models, sample=False):
+
+    fig, axs = plt.subplots(1, len(models)+1, figsize=((len(models)+1)*3, 4), sharey=True)
+    ys, _, _ = pickle.load(open(f'{taskdir}/exp3/testres.pkl', 'rb')) # get test ys from any model (all have same test set)
+    Us = ys[:,0]; Vs = ys[:,2]; rs = ys[:,5]
+    axs[0].plot(rs, Us-Vs, 'ko', markersize=2, alpha=0.1)
+    axs[0].set(ylabel=f' U-V color', xlabel='r magnitude', title='True')
+    for j in range(len(models)):
+        if 'MLP' in models[j]:
+            resfile = f'{taskdir}/MLP/{models[j]}_testres.pkl'
+            modelname = models[j]
+        else: 
+            resfile = f'{taskdir}/{models[j]}/testres.pkl'
+            modelname = f'GNN {models[j][:4]}'
+        _, preds, _ = pickle.load(open(resfile, 'rb'))
+        yhats = get_yhats(preds, sample)
+        Uhats = yhats[:,0]; Vhats = yhats[:,2]; rhats = yhats[:,5]
+        axs[j+1].plot(rhats, Uhats-Vhats, 'ko', markersize=2, alpha=0.1)
+        axs[j+1].set_title(f'{modelname}', fontsize=10)
+        axs[j+1].set_xlabel(f'r magnitude')
+        if sample and len(preds)==2: axs[j+1].text(0.6, 0.8, 'NOTE: data sampled from \npredicted distributions', fontsize=6, transform=axs[j+1].transAxes)
+    plt.tight_layout()
+    plt.subplots_adjust(wspace=0, hspace=0)
+    
+    return fig
+
+def plot_phot_err(ys, preds, labels, unit, name, sample=False):
 
     Fr = [0.79, -0.09, -0.02, -0.40, 8.9e-5, 8.8e-5, 8.7e-5, 8.28e-5] # SDSS U, B,V, in erg/s/cm²/Å. approx u, g, r, i, z conversions from nano-maggies
     l1, l2 = -25, -12
@@ -211,18 +238,19 @@ def plot_phot_err(ys, preds, labels, unit, name):
     if unit == 'erg/s/cm²/Å':
         l1, l2 = -10, -5
         u = r'log($f_{\lambda}$) [erg/s/cm²/Å]'
+    yhats = get_yhats(preds, sample)
     fig, axs = plt.subplots(2, 4, figsize=(15, 5), sharex=True, sharey=True)
     plt.xticks(np.arange(l1, l2, 1))
     plt.yticks(np.linspace(-30, 30, 5))
     for i in range(2):
         for j in range(4):
             idx = 4*i+j
-            pred = preds[:,idx] 
+            yhat = yhats[:,idx] 
             y = ys[:,idx]   
             if unit == 'erg/s/cm²/Å':
                 y = (y - Fr[idx])/2.5 # 10**((y - Fr[idx])/2.5)
-                pred = (pred - Fr[idx])/2.5 # 10**((pred - Fr[idx])/2.5)
-            rel_err = 100*(pred - y)/y
+                yhat = (yhat- Fr[idx])/2.5 # 10**((pred - Fr[idx])/2.5)
+            rel_err = 100*(yhat - y)/y
             bin_means, bin_edges, binnumber = stats.binned_statistic(y, rel_err, statistic='mean', bins=40)
             bin_99th, _, _ = stats.binned_statistic(y, rel_err, statistic=lambda rel_err: np.percentile(rel_err, 99), bins=40)
             bin_1st, _, _ = stats.binned_statistic(y, rel_err, statistic=lambda rel_err: np.percentile(rel_err, 1), bins=40)
@@ -237,6 +265,7 @@ def plot_phot_err(ys, preds, labels, unit, name):
             axs[i,j].text(0.1, 0.9, f'{labels[idx]} band', fontsize=8, transform=axs[i,j].transAxes, weight='bold')
             axs[i,j].set_xlim(l1, l2)
             axs[i,j].set_ylim(-30, 30)
+    if sample and len(preds)==2: axs[0, -1].text(0.6, 0.8, 'NOTE: all data sampled from \npredicted distributions', fontsize=6, transform=axs[0, -1].transAxes)
     axs[-1, -1].legend()   
     fig.supxlabel(f'Hydro Truth {u}')
     fig.supylabel('Percent Error')
@@ -246,7 +275,7 @@ def plot_phot_err(ys, preds, labels, unit, name):
 
     return fig
 
-def plot_err_epoch(val_rmse, targs, stop_epoch, units):
+def plot_err_epoch(val_rmse, targs, stop_epoch, units, name):
     '''
     Should be able to use this for any type of target
     '''
@@ -266,6 +295,7 @@ def plot_err_epoch(val_rmse, targs, stop_epoch, units):
     ax.legend()
     ax.set_ylabel(f'Validation Error [{units[i]}]')
     ax.set_xlabel("Epoch")
+    fig.suptitle(name)
 
     return fig 
 
@@ -306,34 +336,6 @@ def plot_UVr(ys, preds, name):
     
     return fig
 
-def plot_UVr_compare(taskdir, models):
-
-
-    fig, axs = plt.subplots(1, len(models)+1, figsize=((len(models)+1)*3, 4), sharey=True)
-    ys, _, _ = pickle.load(open(f'{taskdir}/exp3/testres.pkl', 'rb')) # get test ys from any model (all have same test set)
-    Us = ys[:,0]; Vs = ys[:,2]; rs = ys[:,5]
-    axs[0].plot(rs, Us-Vs, 'ko', markersize=2, alpha=0.1)
-    axs[0].set(ylabel=f' U-V color', xlabel='r magnitude', title='True')
-    for j in range(len(models)):
-        if 'MLP' in models[j]:
-            resfile = f'{taskdir}/MLP/{models[j]}_testres.pkl'
-            modelname = models[j]
-        else: 
-            resfile = f'{taskdir}/{models[j]}/testres.pkl'
-            modelname = f'GNN {models[j][:4]}'
-        _, preds, _ = pickle.load(open(resfile, 'rb'))
-        if len(preds) == 2: 
-            yhats = preds[0]
-        else: 
-            yhats = preds
-        Uhats = yhats[:,0]; Vhats = yhats[:,2]; rhats = yhats[:,5]
-        axs[j+1].plot(rhats, Uhats-Vhats, 'ko', markersize=2, alpha=0.1)
-        axs[j+1].set_title(f'{modelname}', fontsize=10)
-        axs[j+1].set_xlabel(f'r magnitude')
-    plt.tight_layout()
-    plt.subplots_adjust(wspace=0, hspace=0)
-    
-    return fig
 
 def plot_color_merghist(ys, preds, MHmetrics, name):
 
