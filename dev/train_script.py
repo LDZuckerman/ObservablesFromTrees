@@ -1,3 +1,4 @@
+from networkx import k_components
 import torch, pickle, time, os
 import numpy as np
 import os.path as osp
@@ -6,6 +7,7 @@ import matplotlib.pyplot as plt
 import torch_geometric as tg
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Data
+from accelerate import Accelerator 
 from importlib import __import__
 import random
 import string
@@ -18,10 +20,17 @@ from dev import run_utils, data_utils, models
 import json
 
 
-def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id, gpu): # "train_model"
+def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id, gpu, low_output=False): # "train_model"
     """
     For each of n_trials, train and validate (or train and test) model
     """
+
+    for k in ["hidden_channels", "conv_layers", "decode_layers"]: # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
+        if isinstance(hyper_params[k], str): hyper_params[k] = int(hyper_params[k]) 
+    for k in ["n_epochs", "n_trials", "batch_size", "val_epoch", "patience", "l1_lambda", "l2_lambda", "num_workers"]: # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
+        if isinstance(run_params[k], str): run_params[k] = int(run_params[k]) 
+    for k in learn_params.keys(): # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
+        if isinstance(learn_params[k], str) and k != "schedule": learn_params[k] = float(learn_params[k]) 
     
     ############### SET UP ################
     
@@ -46,7 +55,7 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
     subset_path = data_utils.get_subset_path(data_params, set = 'train')
     if not osp.exists(f'{subset_path}'):
         train_data, val_data = data_utils.create_subset(data_params, return_set = 'train') 
-    else:
+    else: # for sweeps, should probabaly just load once and pass in.. but this doesnt really take that long
         print(f"Dataset subset already exists. Loading from {subset_path}", flush=True)
         train_data, val_data = pickle.load(open(subset_path, 'rb'))
 
@@ -55,14 +64,14 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
     n_targ = len(train_data[0].y)
     if len(train_data[0].y) != len(targ_names): raise ValueError(f"Number of targets in data ({len(train_data[0].y)}) does not match number of targets in data_params ({len(targ_names)})")
     if train_data[0].x.numpy().shape[1] != len(data_params['use_feats']): raise ValueError(f"Number of features in data ({train_data[0].x.numpy().shape[1]}) does not match number of features in data_params ({len(data_params['use_feats'])})")
-    val_loader = DataLoader(val_data, batch_size=run_params['batch_size'], shuffle=0, num_workers=run_params['num_workers']) # REALLY TEST_LOADER IF TEST=1 IN JSON!   ##never shuffle test
+    val_loader = DataLoader(val_data, batch_size=int(run_params['batch_size']), shuffle=0, num_workers=run_params['num_workers']) # REALLY TEST_LOADER IF TEST=1 IN JSON!   ##never shuffle test
     hyper_params['in_channels']= train_data[0].x.numpy().shape[1] # construct_dict['hyper_params']['in_channels']=n_feat
     hyper_params['out_channels']= n_targ # construct_dict['hyper_params']['out_channels']=n_targ
 
     # Initialize evaluation metrics 
     # metric = get_metrics(run_params['metrics']) # FOR NOW JUST USE SCATTER SIGMA 
-    performance_plot = get_performance_plot(run_params['performance_plot'])
-    # tr_accs_alltrials, va_accs_alltrials, scatter_alltrials, = [], [], [] # lists in case n_trials > 1  # REALLY TEST_ACCS IF TEST IF TEST=1 IN JSON
+    performance_plot = get_performance_plot(run_params['performance_plot']) # returns None if performance_plot = None
+    # tr_accs_alltrials, va_accs_alltrials, scatter_alltrials, = [], [], [] # lists in case n_trials > 1 
     # preds_alltrials, lowest_alltrials = [], [] # lists in case n_trials > 1 
     
     ############### LOOP THROUGH TRIALS ###################
@@ -72,7 +81,7 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
     log = run_params['log']
     for trial in range(n_trials):
 
-        # Set logging and state-saving dirs
+        # Set logging, state-saving, and result output dirs
         if n_trials>1:
             run_name_n = run_id+f'_{trial+1}_{n_trials}'
             out_dir_n = osp.join(out_pointer, run_name_n)
@@ -83,6 +92,13 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
             log_dir_n = osp.join(out_pointer+'/TB_logs/', run_name_n) # for TensorBoard events files
             from torch.utils.tensorboard import SummaryWriter 
             writer=SummaryWriter(log_dir=log_dir_n)
+        else: writer = None
+        if 'sweep' in run_id:
+            resfile = f'{out_dir_n}/{run_id}_result_dict.pkl' # If this is part of a sweep, don't create individiual output folders, just result files
+            modelfile = f'{out_dir_n}/{run_id}_model_best.pt' # If this is part of a sweep, don't create individiual output folders, just result files
+        else: 
+            resfile = f'{out_dir_n}/result_dict.pkl'
+            modelfile = f'{out_dir_n}/model_best.pt'
         
         # Initialize model, dataloaders, scheduler, and optimizer
         model = run_utils.get_model(run_params['model'], hyper_params) # print(f"N_params: {sum(p.numel() for p in model.parameters())}", flush=True)
@@ -90,14 +106,17 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
         optimizer = torch.optim.Adam(model.parameters(), lr=lr_init)
         scheduler = lr_scheduler(optimizer, **learn_params, total_steps=n_epochs*len(train_loader))
        
-        # If gpu, feed to accelerator
+        # If gpu, feed to accelerator  #
+        # CRAP, WAS I NOT DOING THIS BEFORE?? BECAUSE NOW I HAD TO FIX THE TORCH-SCATTER ISSUES TO GET IT TO WORK
+        # AND 
+        # DID I ACCIDENTALLY HAVE GPU NOT SET TO 1?? BUT THEN WHY WERE RESULTS PICKLED ON GPU??
         if gpu == '1':
-            from accelerate import Accelerator 
             accelerator = Accelerator() 
             device = accelerator.device
-            _, _, val_loader = accelerator.prepare(model, optimizer, val_loader) # REALLY TEST_LOADER IF TEST=1 IN JSON!!!
+            _, _, val_loader = accelerator.prepare(model, optimizer, val_loader) 
             model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
-        else: accelerator = None
+        else: 
+            accelerator = None
         
         # Initialize accuracy and error tracking
         lowest_metric = np.array([np.inf]*n_targ) 
@@ -137,10 +156,10 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
             if (epoch+1)%val_epoch == 0: 
                 
                 # Perform validation   #train_metric, val_metric, lowest_metric, low_ys, low_pred, k, early_stop = get_val_results(model, run_params, data_params, train_loader, val_loader, optimizer, epoch, metric, k, lowest_metric, save, val_epoch, early_stop, n_targ, low_ys, low_pred, out_dir_n)
-                get_var = True if hyper_params['get_sig'] or hyper_params['get_cov'] else False 
-                tr_ys, tr_preds = run_utils.test(train_loader, model, n_targ, get_var)
-                va_ys, va_preds = run_utils.test(val_loader, model, n_targ, get_var)
-                if get_var: # If predicting mu and sig, test returns [pred_mu, pred_sig], and if predicting mu and cov, test returns [pred_mu, pred_cov]
+                predict_dist = True if hyper_params['get_sig'] or hyper_params['get_cov'] else False 
+                tr_ys, tr_preds = run_utils.test(train_loader, model, n_targ, predict_dist)
+                va_ys, va_preds = run_utils.test(val_loader, model, n_targ, predict_dist)
+                if predict_dist: # If predicting mu and sig, test returns [pred_mu, pred_sig], and if predicting mu and cov, test returns [pred_mu, pred_cov]
                     tr_yhats = tr_preds[0]; va_yhats = va_preds[0]
                 else:
                     tr_yhats = tr_preds; va_yhats = va_preds                
@@ -160,7 +179,7 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
                     low_ys[:,index] = va_ys[:,index]
                     low_yhats[:,index] = va_yhats[:,index]
                     counter = 0 # reset time since last validation improvement to 0
-                    torch.save(model.state_dict(), osp.join(out_dir_n,'model_best.pt'))
+                    torch.save(model.state_dict(), modelfile)
                 else:
                     counter += val_epoch # add num epochs we've run to counter
                                  
@@ -177,7 +196,7 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
                 print_results_and_log(run_params, log, writer, epoch, lr_curr, tot_loss, err_loss, var_loss, l1_loss, l2_loss, train_metric, val_metric, lowest_metric, last10val, counter, n_targ, targ_names)
                 
                 # Every 5th val epoch make (or update - will overwrite each time?) plots 
-                if (epoch+1)%(int(val_epoch*5))==0 and log:
+                if (epoch+1)%(int(val_epoch*5))==0 and log and not low_output:
                     figs = performance_plot(va_ys, va_preds, targ_names)
                     for fig, label in zip(figs, targ_names):
                         writer.add_figure(tag=f'{run_name_n}_{label}', figure=fig, global_step=epoch+1)
@@ -207,9 +226,9 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
         ###################### LOAD IN BEST MODEL, "TEST" ON VAL AND, RESULTS TO LISTS, PLOT #########################
         
         # Perform testing -> doing it again instead of using last val metrics just becasue perhaps last few training epochs werent done before last val epoch (depends on val_epoch and n_epochs)
-        model.load_state_dict(torch.load(osp.join(out_dir_n,'model_best.pt')))
+        model.load_state_dict(torch.load(modelfile))
         ys, preds = run_utils.test(val_loader, model, n_targ, hyper_params['get_sig'], hyper_params['get_cov'])
-        if get_var: # If predicting mu and sig, test returns [pred_mu, pred_sig]
+        if predict_dist: # If predicting mu and sig, test returns [pred_mu, pred_sig]
             yhats = preds[0]
         else:
             yhats = preds
@@ -222,56 +241,54 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
         final_testonval_metric = np.std(ys-yhats, axis=0)
         final_testonval_rmse = np.sqrt(np.mean((ys-yhats)**2, axis=0))
         # preds_alltrials.append(pred)
-        print(f"\nFINAL TESTING RMSE AND SCATTER{s}: {np.round(final_testonval_rmse, 4)}, {np.round(final_testonval_metric, 4)}", flush=True)
+        print(f"\nFINAL TESTING RMSE{s}: {np.round(final_testonval_rmse, 4)}", flush=True)
         
         ###################### SAVE PARAMS AND RESULTS (for this trial) #########################
   
-        # Make params dict to add to writer
-        paramsf = dict(list(data_params.items()) + list(run_params.items()) + list(hyper_params.items()) + list(learn_params.items()))
-        paramsf["targets"] = str(data_params['use_targs']) 
-        paramsf["use_feats"] = str(data_params["use_feats"])
-        N_p = sum(p.numel() for p in model.parameters())
-        N_t = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        paramsf['N_params'] = N_p
-        paramsf['N_trainable'] = N_t
-        from six import string_types
-        for k, v in paramsf.items():  # before adding hparams to write, must change any lists to string
-            if isinstance(v, list):
-                v_new = '['+''.join(f'{x} ' for x in v).rstrip()+']'
-                paramsf[k] = v_new
-            if (isinstance(v, int) or isinstance(v, float) or isinstance(v, string_types) or isinstance(v, bool) or isinstance(v, torch.Tensor) or isinstance(v, list)) == False: 
-                raise ValueError(f'paramsf({k}) is {v} ({type(v)}) -> must be int, float, string, bool, Tensor, or list')  
+        if not low_output:
 
-        # Make metrics dict to add to writer
-        last20 = np.median(va_metrics[-(20//val_epoch):], axis=0) 
-        last10 = np.median(va_metrics[-(10//val_epoch):], axis=0)
-        metricf = {'epoch_exit':epoch}
-        for i in range(n_targ):
-            metricf[f'scatter_{targ_names[i]}'] = final_testonval_metric[i]
-            metricf[f'lowest_{targ_names[i]}'] = lowest_metric[i]
-            metricf[f'last20_{targ_names[i]}'] = last20[i]
-            metricf[f'last10_{targ_names[i]}'] = last10[i]
+            # Make params  and metrics dicts to add to writer
+            paramsf = dict(list(data_params.items()) + list(run_params.items()) + list(hyper_params.items()) + list(learn_params.items()))
+            paramsf["targets"] = str(data_params['use_targs']) 
+            paramsf["use_feats"] = str(data_params["use_feats"])
+            N_p = sum(p.numel() for p in model.parameters())
+            N_t = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            paramsf['N_params'] = N_p
+            paramsf['N_trainable'] = N_t
+            from six import string_types
+            for k, v in paramsf.items():  # before adding hparams to write, must change any lists to string
+                if isinstance(v, list):
+                    v_new = '['+''.join(f'{x} ' for x in v).rstrip()+']'
+                    paramsf[k] = v_new
+                if (isinstance(v, int) or isinstance(v, float) or isinstance(v, string_types) or isinstance(v, bool) or isinstance(v, torch.Tensor) or isinstance(v, list)) == False: 
+                    raise ValueError(f'paramsf({k}) is {v} ({type(v)}) -> must be int, float, string, bool, Tensor, or list')  
+            last20 = np.median(va_metrics[-(20//val_epoch):], axis=0) 
+            last10 = np.median(va_metrics[-(10//val_epoch):], axis=0)
+            metricf = {'epoch_exit':epoch}
+            for i in range(n_targ):
+                metricf[f'scatter_{targ_names[i]}'] = final_testonval_metric[i]
+                metricf[f'lowest_{targ_names[i]}'] = lowest_metric[i]
+                metricf[f'last20_{targ_names[i]}'] = last20[i]
+                metricf[f'last10_{targ_names[i]}'] = last10[i]
+            writer.add_hparams(paramsf, metricf, run_name=run_name_n) 
         
-        # Add to params and metrics dicts to writer and save results dict as pickle
-        writer.add_hparams(paramsf, metricf, run_name=run_name_n) 
+        # Save results dict as pickle
         result_dict={'tot loss each epoch': tot_losses,             # [n_epochs]
                      'sig loss each epoch': var_losses,             # [n_epochs]
                      'err loss each epoch': err_losses,             # [n_epochs]
                      'lr each val epoch': lrs,                      # [n_epochs/val_epoch]    
-                     'val scatter each val epoch': va_metrics,      # [n_epochs/val_epoch, n_targs]
-                     'train scatter each val epoch': tr_metrics,    # [n_epochs/val_epoch, n_targs]
+                     'val metric each val epoch': va_metrics,      # [n_epochs/val_epoch, n_targs]
+                     'train metric each val epoch': tr_metrics,    # [n_epochs/val_epoch, n_targs]
                      'val rmse each val epoch': va_rmses,           # [n_epochs/val_epoch, n_targs]
                      'train rmse each val epoch': tr_rmses,         # [n_epochs/val_epoch, n_targs]
-                     'val sig final test': final_testonval_metric,  # [n_targs]
+                     'val metric final test': final_testonval_metric,  # [n_targs] # same as RMSE
                      'val rmse final test': final_testonval_rmse,   # [n_targs]
                      'val preds final test': final_testonval_preds, # [[n_val_samples, n_targs], [n_val_samples, n_targs]] 
                      'val ys final test': final_testonval_ys,       # [n_val_samples, n_targs]
                       #'ys': ys, 'pred': pred, 'low_ys': low_ys, 'low_pred': low_pred, 'low':lowest_metrics, 'vars': vars, 'rhos': rhos,  # Why is it usefull to save these at all? 
                      'epochexit': epochexit}
-        with open(f'{out_dir_n}/result_dict.pkl', 'wb') as handle:
+        with open(resfile, 'wb') as handle:
             pickle.dump(result_dict, handle)
-        # with open(f'{out_dir_n}/construct_dict.pkl', 'wb') as handle: # Just save exp file instead. Only thing that getting updated during run was adding in/out feats in construct_dict['hyper_params'], but that should be clear from use_targs and use_feats (and above I'm checking that they are the same)
-        #     pickle.dump(construct_dict, handle)
         
     print(f'\nFINISHED ALL TRIALS', flush=True)
     
@@ -283,7 +300,7 @@ def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_fu
             var = predicted variances (aka sig)
          When using correlated guassion loss funcs, model returns
             var = predicted variances (aka sig)
-            rho = 
+            cov = predicted covariances (aka rho?)
     '''
     
     model.train()
@@ -293,7 +310,7 @@ def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_fu
 
     if gpu == '1': init = torch.cuda.FloatTensor([0])
     else: init = torch.FloatTensor([0])
-    get_var = True if run_params['loss_func'] in ["GaussNd", "Navarro", "GaussNd_corr"] else False # sig OR cov 
+    predict_dist = True if run_params['loss_func'] in ["GaussNd", "Navarro", "GaussNd_corr"] else False # sig OR cov 
     er_loss = torch.clone(init)
     va_loss = torch.clone(init)
     #rho_loss = torch.tensor([np.nan])
@@ -302,7 +319,7 @@ def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_fu
     for data in train_loader: 
         if gpu == '0':
             data = data.to('cpu')
-        if get_var:
+        if predict_dist:
             out, var = model(data)  # var is either sig OR cov
             loss, err_loss, var_loss = loss_func(out, data.y.view(-1,n_targ), var) # var is either sig OR cov
             er_loss+=err_loss
@@ -312,7 +329,7 @@ def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_fu
             loss = loss_func(out, data.y.view(-1,n_targ))
         l1_norm = sum(p.abs().sum() for p in model.parameters())
         l2_norm = sum(p.pow(2.0).sum() for p in model.parameters()) 
-        loss = loss + l1_lambda * l1_norm + l2_lambda * l2_norm # add other terms to loss
+        loss = loss + l1_lambda * l1_norm + l2_lambda * l2_norm # add terms to penalize large param values to loss (?)
         return_loss += loss
         if gpu == '1':
             accelerator.backward(loss)
@@ -367,7 +384,10 @@ def get_performance_plot(name):
     '''
 
     import dev.plot_utils as evals
-    performance_plot = getattr(evals, name)
+    if name != None:
+        performance_plot = getattr(evals, name)
+    else:
+        performance_plot = None
 
     return performance_plot 
 

@@ -8,23 +8,20 @@ import numpy as np
 import matplotlib as mpl
 import scipy.stats as stats
 import pickle, json
+import sys
 import os.path as osp
-from sklearn.semi_supervised import LabelSpreading
-from sympy import Predicate, plot
-
-def get_yhats(preds, sample=False):
-
-    if len(preds) == 2: 
-        muhats = preds[0]
-        if sample:
-            sigmahats = preds[1]
-            yhats = np.random.normal(muhats, sigmahats)
-        else: 
-            yhats = muhats
-    else: 
-        yhats = preds
-
-    return yhats
+import pandas as pd
+from torch.nn import functional as tf
+from scipy import special, stats
+import matplotlib.pyplot as pl
+import networkx as nx
+import torch_geometric as tg
+from itertools import count
+try: 
+    from dev import data_utils
+except:
+    sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
+    from ObservablesFromTrees.dev import data_utils, run_utils
 
 def multi_base(ys, pred, targets):
     ''' 
@@ -121,30 +118,31 @@ def plot_preds_compare(ys, preds, sm_ys, sm_preds, targs):
 
 def plot_phot_preds(ys, preds, labels, unit, name, sample=False):
 
-    l1, l2 = -25, -12
+    l1, l2, step = -25, -12, 2
     u = '[mag]'
     if unit == 'erg/s/cm²/Å':
-        l1, l2 = -10, -5
+        l1, l2 , step = -10, -5, 1
         u = r'log($f_{\lambda}$) [erg/s/cm²/Å]'
-    yhats = get_yhats(preds, sample)
+    yhats, sampled = data_utils.get_yhats(preds, sample)
     fig, axs = plt.subplots(2, 4, figsize=(15, 7), sharex=True, sharey=True)
-    plt.xticks(np.arange(l1, l2, 1))
-    plt.yticks(np.arange(l1, l2, 1))
+    plt.xticks(np.arange(l1, l2, step))
+    plt.yticks(np.arange(l1, l2, step))
     for i in range(2):
         for j in range(4):
             idx = 4*i+j
             plot_phot(axs[i,j], yhats, ys, idx, labels, unit, l1, l2)  
-    if sample: axs[0, -1].text(0.5, 0.85, 'NOTE: all data sampled from \npredicted distributions', fontsize=6, transform=axs[0, -1].transAxes)
+    #if sample: axs[0, -1].text(0.5, 0.85, 'NOTE: all data sampled from \npredicted distributions', fontsize=6, transform=axs[0, -1].transAxes)
+    note = 'sampled from predicted distributions' if sampled  else 'using predicted means'
+    plt.suptitle(f'{name} U-V color vs r magnitude {note}')
     fig.supxlabel(f'Hydro Truth {u}')
     fig.supylabel(f'Model Prediction {u}')
-    fig.suptitle(name)
     plt.tight_layout()
     plt.subplots_adjust(wspace=0, hspace=0)
 
     return fig
 
 
-def plot_phot_preds_compare(taskdir, models, unit = 'erg/s/cm²/Å', sample=False):
+def plot_phot_preds_compare(taskdir, models, unit = 'erg/s/cm²/Å', sample=False, uselabels=None):
 
     l1, l2 = -25, -12
     rmse_min = 0.5; rmse_max = 1.3
@@ -155,24 +153,27 @@ def plot_phot_preds_compare(taskdir, models, unit = 'erg/s/cm²/Å', sample=Fals
         rmse_min = 0.21; rmse_max = 0.38
         u = r'log($f_{\lambda}$) [erg/s/cm²/Å]'
         ticks = np.arange(l1, l2, 1)
-    fig, axs = plt.subplots(8, len(models), figsize=(4*len(models), 8*2.5), sharex=True, sharey=True)
+    if sample: l2 += 1
+    if uselabels == None: # if not specified, use all labels (and get from any model's config - currently assuming all predict same targets)
+        configfile = f'{taskdir}/MLP/{models[0]}_config.json' if 'MLP' in models[0] else f'{taskdir}/{models[0]}/expfile.json'
+        uselabels = json.load(open(configfile, 'rb'))['data_params']['use_targs']
+    fig, axs = plt.subplots(len(uselabels), len(models), figsize=(4*len(models), len(uselabels)*2.5), sharex=True, sharey=True)
     textcmap = truncate_colormap(cm.get_cmap('hot'), 0, 0.3) #truncate_colormap(cm.get_cmap('ocean'), 0, 0.2)
     plt.xticks(ticks)
     plt.yticks(ticks)
     for j in range(len(models)):
         resfile = f'{taskdir}/MLP/{models[j]}_testres.pkl' if 'MLP' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
-        configfile = f'{taskdir}/MLP/{models[j]}_config.json' if 'MLP' in models[j] else f'{taskdir}/{models[j]}/expfile.json'
         modelname = models[j] if 'MLP' in models[j] else f'GNN {models[j]}'
         ys, preds, _ = pickle.load(open(resfile, 'rb'))
-        labels = json.load(open(configfile, 'rb'))['data_params']['use_targs']
-        yhats = get_yhats(preds, sample)
-        for i in range(len(labels)):
-            plot_phot(axs[i,j], yhats, ys, i, labels, unit, l1, l2, textcmap, rmse_min, rmse_max)  
+        yhats, sampled = data_utils.get_yhats(preds, sample)
+        for i in range(len(uselabels)):
+            plot_phot(axs[i,j], yhats, ys, i, uselabels, unit, l1, l2, textcmap, rmse_min, rmse_max)  
         axs[0,j].set_title(f'{modelname}', fontsize=10)
-        if sample and len(preds)==2: axs[0, -1].text(0.5, 0.85, 'NOTE: data for this model sampled\nfrom predicted distributions', fontsize=6, transform=axs[0, -1].transAxes)
-
+        if sample and len(preds)!=2: axs[j,0].text(0.1, 0.6, 'PREDICTED MEANS \n(NOT A DIST \nMODEL)', fontsize=8, transform=axs[0,j].transAxes)
     fig.supxlabel(f'Hydro Truth {u}')
     fig.supylabel(f'Model Prediction {u}')
+    note = 'sampled from predicted distributions' if sampled else 'using predicted means'
+    plt.suptitle(f'U-V color vs r magnitude {note}\n')
     plt.tight_layout()
     plt.subplots_adjust(wspace=0, hspace=0)
 
@@ -209,6 +210,8 @@ def plot_UVr_compare(taskdir, models, sample=False):
     fig, axs = plt.subplots(1, len(models)+1, figsize=((len(models)+1)*3, 4), sharey=True)
     ys, _, _ = pickle.load(open(f'{taskdir}/exp3/testres.pkl', 'rb')) # get test ys from any model (all have same test set)
     Us = ys[:,0]; Vs = ys[:,2]; rs = ys[:,5]
+    extent = [[-23, -14], [-4, 4]] # approx limits of worst model (MLP3) when sampled - idk if this really captures things well though
+    trueUVr, xedges, yedges = np.histogram2d(rs, Us-Vs, bins=100, range=extent, density=True)  # set x and y ranges becasue otherwise kl div will be lower if predicted dist has huge range
     axs[0].plot(rs, Us-Vs, 'ko', markersize=2, alpha=0.1)
     axs[0].set(ylabel=f' U-V color', xlabel='r magnitude', title='True')
     for j in range(len(models)):
@@ -219,12 +222,23 @@ def plot_UVr_compare(taskdir, models, sample=False):
             resfile = f'{taskdir}/{models[j]}/testres.pkl'
             modelname = f'GNN {models[j][:4]}'
         _, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats = get_yhats(preds, sample)
+        yhats, sampled = data_utils.get_yhats(preds, sample)
         Uhats = yhats[:,0]; Vhats = yhats[:,2]; rhats = yhats[:,5]
+        predUVr, xedges, yedges = np.histogram2d(rhats, Uhats-Vhats, bins=100, range=extent, density=True) # set x and y ranges becasue otherwise kl div will be lower if predicted dist has huge range
+        predUVr = np.where(predUVr==0, 0.001, predUVr) # add small value to zero bins, otherwise KL_div will be inf for those bins # # COULD TRY instead normalizing only after histograming, and normalize to not exactly std normal to add some small values predUVr = (predUVr - np.mean(predUVr))/np.std(predUVr) 
+        kldiv = np.round(np.mean(special.kl_div(trueUVr, predUVr)), 3) # mean over all bins. 0 if dists are exactly the same
+        relentr = np.round(np.mean(special.rel_entr(trueUVr, predUVr)), 3) # mean over all bins. 0 if dists are exactly the same
+        #print(kldiv); fig, axs = plt.subplots(1, 2); im1 = axs[0].imshow(trueUVr); plt.colorbar(im1); im2 = axs[1].imshow(predUVr); plt.colorbar(im2); plt.show(); a=b
+        # ks_stat, ks_Pval = np.round(stats.ks_2samp(trueUVr, predUVr), 2) # Tests H0: two dists are the same. High P_value = cannot reject H0
+        mmd = np.round(float(run_utils.MMD(trueUVr, predUVr, kernel='rbf')), 3) # Tests H0: two dists are the same. High P_value = cannot reject H0  
+        t = axs[j+1].text(0.6, 0.15, f'KLD: {kldiv}\nRE: {relentr}\nMMD: {mmd}', fontsize=10, transform=axs[j+1].transAxes)
+        t.set_bbox(dict(facecolor='white', alpha=0.5, edgecolor='grey'))
         axs[j+1].plot(rhats, Uhats-Vhats, 'ko', markersize=2, alpha=0.1)
         axs[j+1].set_title(f'{modelname}', fontsize=10)
         axs[j+1].set_xlabel(f'r magnitude')
-        if sample and len(preds)==2: axs[j+1].text(0.6, 0.8, 'NOTE: data sampled from \npredicted distributions', fontsize=6, transform=axs[j+1].transAxes)
+        #if sample and len(preds)==2: axs[j+1].text(0.5, 0.8, 'NOTE: data sampled from \npredicted distributions', fontsize=6, transform=axs[j+1].transAxes)
+    note = 'sampled from predicted distributions' if sampled else 'using predicted means'
+    plt.suptitle(f'U-V color vs r magnitude {note}')
     plt.tight_layout()
     plt.subplots_adjust(wspace=0, hspace=0)
     
@@ -233,14 +247,14 @@ def plot_UVr_compare(taskdir, models, sample=False):
 def plot_phot_err(ys, preds, labels, unit, name, sample=False):
 
     Fr = [0.79, -0.09, -0.02, -0.40, 8.9e-5, 8.8e-5, 8.7e-5, 8.28e-5] # SDSS U, B,V, in erg/s/cm²/Å. approx u, g, r, i, z conversions from nano-maggies
-    l1, l2 = -25, -12
+    l1, l2, step = -25, -12, 2
     u = '[mag]'
     if unit == 'erg/s/cm²/Å':
-        l1, l2 = -10, -5
+        l1, l2, step = -10, -5, 1
         u = r'log($f_{\lambda}$) [erg/s/cm²/Å]'
-    yhats = get_yhats(preds, sample)
+    yhats, sampled = data_utils.get_yhats(preds, sample)
     fig, axs = plt.subplots(2, 4, figsize=(15, 5), sharex=True, sharey=True)
-    plt.xticks(np.arange(l1, l2, 1))
+    plt.xticks(np.arange(l1, l2, step))
     plt.yticks(np.linspace(-30, 30, 5))
     for i in range(2):
         for j in range(4):
@@ -265,11 +279,12 @@ def plot_phot_err(ys, preds, labels, unit, name, sample=False):
             axs[i,j].text(0.1, 0.9, f'{labels[idx]} band', fontsize=8, transform=axs[i,j].transAxes, weight='bold')
             axs[i,j].set_xlim(l1, l2)
             axs[i,j].set_ylim(-30, 30)
-    if sample and len(preds)==2: axs[0, -1].text(0.6, 0.8, 'NOTE: all data sampled from \npredicted distributions', fontsize=6, transform=axs[0, -1].transAxes)
+    #if sampled: axs[0, -1].text(0.6, 0.8, 'NOTE: all data sampled from \npredicted distributions', fontsize=6, transform=axs[0, -1].transAxes)
+    note = 'using samples from predicted distributions' if sampled  else 'using predicted means'
+    plt.suptitle(f'{name} percent error {note}')
     axs[-1, -1].legend()   
     fig.supxlabel(f'Hydro Truth {u}')
     fig.supylabel('Percent Error')
-    fig.suptitle(name)
     plt.tight_layout()
     plt.subplots_adjust(wspace=0, hspace=0)
 
@@ -336,22 +351,75 @@ def plot_UVr(ys, preds, name):
     
     return fig
 
+def plot_color_merghist_compare(taskdir, models, sample=False):
 
-def plot_color_merghist(ys, preds, MHmetrics, name):
+    ys, _, _ = pickle.load(open(f'{taskdir}/exp3/testres.pkl', 'rb')) # get test ys from any model (all have same test set)
+    U_true = ys[:,0]; V_true = ys[:,2]
+    Vbins = [-22, -21, -20, -17, -13]
+    fig, axs = plt.subplots(len(Vbins)-1, len(models)+1, figsize=((len(models)+1)*3, 1.5*len(Vbins)), sharey=True, sharex=True)
+
+    for i in range(len(Vbins)-1):
+        Utrue = U_true[np.where((V_true > Vbins[i]) & (V_true < Vbins[i+1]))[0]]
+        Vtrue = V_true[np.where((V_true > Vbins[i]) & (V_true < Vbins[i+1]))[0]]
+        MHmetrics = pickle.load(open('../Data/vol100/DS1_[0, 1, 3, 4]_[0, 1, 2, 3, 4, 5, 6, 7]_[70, 10, 20]_testMHmetrics.pkl', 'rb'))
+        z_50 = np.array(MHmetrics['z_50'].values)
+        z_50_true = z_50[np.where((V_true > Vbins[i]) & (V_true < Vbins[i+1]))[0]]
+        axs[i,0] = get_binned_dist(axs[i,0], z_50_true,  Utrue - Vtrue,  nstatbins = np.unique(z_50_true))
+        axs[i,0].set_ylabel('U-V color')
+        axs[-1,0].set_xlabel('z50')
+    axs[0,0].set_title('Truth')
+
+    for j in range(len(models)):
+        if 'MLP' in models[j]:
+            # resfile = f'{taskdir}/MLP/{models[j]}_testres.pkl'
+            # modelname = models[j]
+            raise NameError('Cant yet add MLPs because cant go back and create MH metrics since xs are not full graphs. And cant use the same as for the GNN models becasue used random TTS. If need to do this, will need to at least re-test the MLPs on final halos data created from the same graphs in the GNN test set.')
+        else: 
+            resfile = f'{taskdir}/{models[j]}/testres.pkl'
+            MHmetrics = pickle.load(open('../Data/vol100/DS1_[0, 1, 3, 4]_[0, 1, 2, 3, 4, 5, 6, 7]_[70, 10, 20]_testMHmetrics.pkl', 'rb'))
+            modelname = f'GNN {models[j][:4]}'
+        _, preds, _ = pickle.load(open(resfile, 'rb'))
+        yhats, sampled = data_utils.get_yhats(preds, sample) 
+        Uhats = yhats[:,0]; Vhats = yhats[:,2]  
+        for i in range(len(Vbins)-1):
+            Uhat = Uhats[np.where((Vhats > Vbins[i]) & (Vhats < Vbins[i+1]))[0]]
+            Vhat = Vhats[np.where((Vhats > Vbins[i]) & (Vhats < Vbins[i+1]))[0]]
+            z_50 = np.array(MHmetrics['z_50'].values)
+            z_50_pred = z_50[np.where((Vhats > Vbins[i]) & (Vhats < Vbins[i+1]))[0]]
+            axs[i,j+1] = get_binned_dist(axs[i,j+1], z_50_pred,  Uhat - Vhat,  nstatbins = np.unique(z_50_pred))
+            axs[0,j+1].set_title(modelname)
+            axs[-1,j+1].set_xlabel('z50')
+            axs[i,int((len(models)+1)/2)].text(0.75, 0.85, f'V mag bin {Vbins[i]} to {Vbins[i+1]} ', transform=axs[i,1].transAxes, backgroundcolor='w')
+        
+    fig.tight_layout()
+    plt.subplots_adjust(wspace=0, hspace=0)
+
+    return fig 
+
+
+def plot_color_merghist(ys, preds, MHmetrics, name, sample=False):
 
     metric_names = ['Total N Halos', r'$z_{25}$', r'$z_{50}$', r'$z_{75}$']
-    z_50 = MHmetrics['z_50']
+    z_50 = np.array(MHmetrics['z_50'].values)
     U_true = ys[:,0]; V_true = ys[:,2]
-    U_pred = preds[:,0]; V_pred = preds[:,2]
-    bins = np.linspace(-22, -13, 5, dtype=int)
+    yhats, sampled = data_utils.get_yhats(preds, sample)
+    Uhats = yhats[:,0]; Vhats = yhats[:,2]
+    bins = [-22, -21, -20, -17, -13]
     fig, axs = plt.subplots(len(bins)-1, 2, figsize=(3*2, 1.5*len(bins)), sharey=True, sharex=True)
     for i in range(len(bins)-1):
-        idxs_true = np.where((V_true > bins[i]) & (V_true < bins[i+1]))[0]
-        idxs_pred = np.where((V_pred > bins[i]) & (V_pred < bins[i+1]))[0]
-        axs[i,0].plot(z_50[idxs_true], U_true[idxs_true]-V_true[idxs_true],'ko', markersize=2, alpha=0.1)
-        axs[i,1].plot(z_50[idxs_pred], U_pred[idxs_pred]-V_pred[idxs_pred],'ko', markersize=2, alpha=0.1)
+
+        Utrue = U_true[np.where((V_true > bins[i]) & (V_true < bins[i+1]))[0]]
+        Vtrue = V_true[np.where((V_true > bins[i]) & (V_true < bins[i+1]))[0]]
+        z_50_true = z_50[np.where((V_true > bins[i]) & (V_true < bins[i+1]))[0]]
+        axs[i,0] = get_binned_dist(axs[i,0], z_50_true,  Utrue - Vtrue,  nstatbins = np.unique(z_50_true))
         axs[i,0].set_ylabel('U-V color')
+
+        Uhat = Uhats[np.where((Vhats > bins[i]) & (Vhats < bins[i+1]))[0]]
+        Vhat = Vhats[np.where((Vhats > bins[i]) & (Vhats < bins[i+1]))[0]]
+        z_50_pred = z_50[np.where((Vhats > bins[i]) & (Vhats < bins[i+1]))[0]]
+        axs[i,1] = get_binned_dist(axs[i,1], z_50_pred,  Uhat - Vhat, nstatbins = np.unique(z_50_pred))
         axs[i,1].text(-0.25, 0.85, f'V mag bin {bins[i]} to {bins[i+1]} ', transform=axs[i,1].transAxes, backgroundcolor='w')
+
     axs[-1,0].set_xlabel(f'{metric_names[2]}')
     axs[-1,1].set_xlabel(f'{metric_names[2]}')
     axs[0,0].set_title('True')
@@ -360,7 +428,22 @@ def plot_color_merghist(ys, preds, MHmetrics, name):
     fig.tight_layout()
     plt.subplots_adjust(wspace=0, hspace=0)
     
-    return fig       
+    return fig      
+
+def get_binned_dist(ax, x, y, nstatbins): 
+
+    bin_means, bin_edges, binnumber = stats.binned_statistic(x, y, statistic='mean', bins=nstatbins)
+    bin_99th, _, _ = stats.binned_statistic(x, y, statistic=lambda y: np.percentile(y, 99), bins=nstatbins)
+    bin_1st, _, _ = stats.binned_statistic(x, y, statistic=lambda y: np.percentile(y, 1), bins=nstatbins)
+    bin_75th, _, _ = stats.binned_statistic(x, y, statistic=lambda y: np.percentile(y, 75), bins=nstatbins)
+    bin_25th, _, _ = stats.binned_statistic(x, y, statistic=lambda y: np.percentile(y, 25), bins=nstatbins)
+    bin_width = (bin_edges[1] - bin_edges[0])
+    bin_centers = bin_edges[1:] - bin_width/2
+    ax.plot(bin_centers, bin_means, 'g')
+    ax.fill_between(bin_centers, bin_25th, bin_75th, color='g', alpha=0.2, label='50%')
+    ax.fill_between(bin_centers, bin_1st, bin_99th, color='g', alpha=0.07, label='98%')
+
+    return ax
 
 def plot_phot_errby_halofeat(ys, preds, z0xall, used_feats, all_feats, all_featdescriptions, tree_meta, plot_by, name):
 
@@ -469,12 +552,138 @@ def plot_phot_errby_merghist(ys, preds, test_MHmetrics, name):
 
     return fig    
 
+def plot_spatial(pos_test, mstar_test, pos_raw, mstar_raw):
+
+    fig, axs = plt.subplots(1, 2, figsize=(10,5), sharey=True)
+    im = axs[0].scatter(pos_test[:,0]/0.704, pos_test[:,1]/0.704, c=mstar_test, s=2, alpha=0.5)
+    axs[0].set_title('Test set galaxies')
+    axs[0].set_ylabel('x pos Mpc')
+    axs[0].set_xlabel('y pos Mpc')
+    mstar_raw1 = np.where(np.isinf(mstar_raw), np.NaN, mstar_raw) # set -inf (from taking log of zero) to np.NaN
+    im = axs[1].scatter(pos_raw[:,0]/0.704, pos_raw[:,1]/0.704, c=mstar_raw1, s=0.5, alpha=0.5)
+    axs[1].set_title('TNG galaxies')
+    axs[1].set_xlabel('x pos Mpc')
+    fig.subplots_adjust(right=0.7)
+    cbar_ax = fig.add_axes([0.9999, 0.15, 0.01, 0.7])
+    fig.tight_layout()
+    fig.colorbar(im, cax=cbar_ax, label=r'log$_{10}$ M$_{*}$')
+    plt.subplots_adjust(wspace=0, hspace=0.3)
+
+    return fig
+
+def plot_PS_band_compare(taskdir, dataset, models = ['exp3', 'exp4', 'exp6'], by='V mag', sample=True, plotdiff=False):
+
+    nc = 128
+    bs = 110.7*0.704 # want in units of Mpc/h
+    if by == 'V mag':
+        bins = [-22, -21, -20, -18, -15, -13]
+    if by == 'U-V':
+        raise NotImplementedError('Set bins U-V!')
+    colors = cm.get_cmap(truncate_colormap(cm.get_cmap('jet'), 0.3, 0.7))(np.linspace(0,1,len(bins)-1)) # pl.cm.jet(np.linspace(0,1,len(Vbins)-1))
+    #print(cm.get_cmap(colors)(np.linspace(0,1,len(Vbins)-1)))
+
+    # Load test data information (pos, Mstar)
+    testdata, test_z0xall = pickle.load(open(f'{taskdir}/exp3/testdata.pkl', 'rb')) # get test ys from any model (all have same test set)
+    featnames = json.load(open(f"../Data/vol100/{dataset}_meta.json", 'rb'))[2]['tree meta']['featnames']
+    z0xall = np.vstack(test_z0xall)
+    pos = np.vstack([z0xall[:, featnames.index('x(17)')], z0xall[:, featnames.index('y(18)')], z0xall[:, featnames.index('z(19)')]]).T # Mpc/h
+    all_otherSHtargs = pickle.load(open(f'../Data/vol100/subfind_othertargs.pkl', 'rb'))
+    testidxs = np.load(osp.expanduser(f"../Data/vol100/{dataset}_testidx20.npy")) 
+    all_testtargs =  pd.DataFrame(columns = all_otherSHtargs.columns)
+    for i in range(len(all_otherSHtargs)):
+        if i in testidxs: all_testtargs.loc[len(all_testtargs)] = all_otherSHtargs.iloc[i]
+    mstar = np.log10(np.array(all_testtargs['SubhaloStelMass'], dtype=float)*(10**10)/0.704) # mstar for test set (e.g. transformed)
+    ys, _, _ = pickle.load(open(f'{taskdir}/exp3/testres.pkl', 'rb')) 
+    V_true = ys[:,2]; U_true = ys[:,0]
+    
+    # If not plotting difference, plot for true bins
+    if plotdiff:
+        fig, axs = plt.subplots(1, len(models), figsize=((len(models))*4, 4), sharey=True, sharex=True)
+    else:
+        fig, axs = plt.subplots(1, len(models)+1, figsize=((len(models)+1)*4, 4), sharey=True, sharex=True)
+        for i in range(len(bins)-1):
+            if by == 'V mag':
+                idxs = np.where(V_true < bins[i+1])[0] # np.where((val > bins[i]) & (val < bins[i+1]))[0]
+            elif by == 'U-V':
+                idxs = np.where((V_true-U_true  > bins[i]) & (V_true-U_true  < bins[i+1]))[0]
+            pos_true_bin = pos[idxs]
+            pos_true_bin_nc = (pos_true_bin/bs) * nc # want in units of nc
+            mstar_true_bin = mstar[idxs]  # Dont normalize - should allow bins with more massive gals to plot higher up # weights = mstar_true_bin/len(mstar_true_bin) # lets normalize by num gals in that bin, but not by the max mass in the bin #np.max(mstar_true_bin)
+            field_true = paintcic(pos_true_bin_nc, mass=mstar_true_bin, bs=bs, nc=nc)
+            field_true = field_true/np.mean(field_true)
+            k_true, p_true = power(field_true, boxsize=bs) 
+            p_true_scl = p_true #- sum(mstar_true_bin)/bs**3 # sum of all masses in bin divided by volume
+            axs[0].plot(k_true, p_true_scl, c=colors[i])
+        axs[0].set_xlabel(r'k [$h^{-1} Mpc$]')
+        axs[0].set_title('Truth')
+
+    # Plot for pred bins
+    for j in range(len(models)):
+        if 'MLP' in models[j]:
+            resfile = f'{taskdir}/MLP/{models[j]}_testres.pkl'
+            modelname = models[j]
+            model_ds = json.load(open(f"{taskdir}/MLP/{modelname}_config.json","rb"))['data_params']['data_file'].replace('.pkl', '')
+            #raise NameError('Cant yet add MLPs because use different test set, so pos and mstar dont correspond. If need to do this, will need to at least re-test the MLPs on final halos data created from the same graphs in the GNN test set.')
+        else: 
+            resfile = f'{taskdir}/{models[j]}/testres.pkl'
+            modelname = f'GNN {models[j][:4]}'
+            model_ds = json.load(open(f"{taskdir}/{models[j]}/expfile.json","rb"))['data_params']['data_file'].replace('.pkl', '')
+        if dataset not in model_ds:
+                raise ValueError(f'{modelname} was trained on {model_ds} not {dataset}. Shouldnt compare models run on different datasets')
+        _, preds, _ = pickle.load(open(resfile, 'rb'))
+        yhats, sampled = data_utils.get_yhats(preds, sample) 
+        V_pred = yhats[:,2]; U_pred = yhats[:,0] 
+        ax_idx = j if plotdiff else j+1
+        for i in range(len(bins)-1):
+            if by == 'V mag':
+                idxs = np.where(V_pred < bins[i+1])[0] # np.where((val > bins[i]) & (val < bins[i+1]))[0]
+            elif by == 'U-V':
+                idxs = np.where((V_pred-U_pred  > bins[i]) & (V_pred-U_pred  < bins[i+1]))[0]
+            pos_bin = pos[idxs]
+            pos_pred_bin_nc = (pos_bin/bs) * nc # want in units of nc
+            mstar_bin = mstar[idxs]  
+            field_pred = paintcic(pos_pred_bin_nc, mass=mstar_bin, bs=bs, nc=nc)
+            field_pred = field_pred/np.mean(field_pred)
+            k_pred, p_pred = power(field_pred, boxsize=bs)
+            p_pred_scl = p_pred - sum(mstar_bin)/bs**3 # sum of all masses in bin divided by volume
+            if plotdiff:
+                if by == 'V mag':
+                    idxs = np.where(V_true < bins[i+1])[0] # np.where((val > bins[i]) & (val < bins[i+1]))[0]
+                elif by == 'U-V':
+                    idxs = np.where((V_true-U_true  > bins[i]) & (V_true-U_true  < bins[i+1]))[0]
+                pos_true_bin = pos[idxs]
+                pos_true_bin_nc = (pos_true_bin/bs) * nc # want in units of nc
+                mstar_true_bin = mstar[idxs]  # Dont normalize - should allow bins with more massive gals to plot higher up # weights = mstar_true_bin/len(mstar_true_bin) # lets normalize by num gals in that bin, but not by the max mass in the bin #np.max(mstar_true_bin)
+                field_true = paintcic(pos_true_bin_nc, mass=mstar_true_bin, bs=bs, nc=nc)
+                field_true = field_true/np.mean(field_true)
+                k_true, p_true = power(field_true, boxsize=bs) 
+                p_true_scl = p_true #- sum(mstar_true_bin)/bs**3 # sum of all masses in bin divided by volume
+                label = f'{by} {bins[i]} to {bins[i+1]}' if by == 'U-V' else f'{by} < {bins[i+1]}'
+                axs[ax_idx].plot(k_pred, p_pred_scl-p_true_scl, label=label, c=colors[i])   
+            else:
+                axs[ax_idx].plot(k_pred, p_pred_scl, label=f'{by} {bins[i]} to {bins[i+1]}', c=colors[i])   
+            axs[ax_idx].set_xlabel(r'k [$h^{-1} Mpc$]')
+            axs[ax_idx].set_title(modelname)
+
+    axs[-1].legend()
+    xlab = r'predicted - true p(k) [$(h^{-1} Mpc)^3$]' if plotdiff else r'p(k) [$(h^{-1} Mpc)^3$]' 
+    axs[0].set_ylabel(xlab)
+    plt.semilogx(); #plt.semilogy()
+    fig.tight_layout()
+    plt.subplots_adjust(wspace=0, hspace=0)
+    plt.subplots_adjust(top=0.85)
+    note = 'sampled from predicted distributions' if sampled  else 'using predicted means'
+    plt.suptitle(f'Power spectra {note}')
+
+    return fig
+
+
 ###########
 # Graph plotting functions
 ###########
 
 
-def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False):
+def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False, colorby='mass'):
 
     ####
     # Is k mass? That would seem like a good chance to color nodes by, and its what he has is colorbar titled
@@ -506,11 +715,15 @@ def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False):
     labels = nx.get_node_attributes(G, 'Mvir') # dict of  "index: value" pairs 
     masses = set(labels.values()) # just a typo that he was calling this progs??
 
-    mapping = dict(zip(sorted(masses),count())) # should be dict of   # sorted() sorts by first value (scale)
-    nodes = G.nodes()
-
-    #colors = [G.nodes[n]['Mvir'] for n in nodes] 
-    colors = [mapping[G.nodes[n]['Mvir']] for n in nodes]
+    nodes = G.nodes()#; print([n for n in nodes])
+    if colorby == 'mass':
+        mapping = dict(zip(sorted(masses),count())) # should be dict of   # sorted() sorts by first value (scale)
+        colors = [mapping[G.nodes[n]['Mvir']] for n in nodes] #colors = [G.nodes[n]['Mvir'] for n in nodes] 
+    # if colorby == 'massdiff':
+    #     ms = np.array(list(labels.values()))
+    #     diffs = [0] + [ms[i]-ms[i-1] for i in range(1,len(masses))]
+    #     mapping = dict(zip(sorted(diffs),count())) # should be dict of   # sorted() sorts by first value (scale)
+    #     colors = [0] + [mapping[G.nodes[i-1]['Mvir']-G.nodes[i]['Mvir']] for i in range(1,len(nodes))] # [mapping[G.nodes[n-1]['Mvir']-G.nodes[n]['Mvir']] for n in nodes]
 
     # label_zpos = np.unique(1/x[:,scalecol] - 1) #  scale = 1/(1+z)    # np.unique(1/transformer[0].inverse_transform(feats[:,0].reshape(-1,1))-1)
     label_ypos = np.linspace(0, -100, 20)
@@ -529,7 +742,8 @@ def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False):
         if not first: ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=True)
         cbar = fig.colorbar(nc, shrink=0.5, ax=ax)
         cbar.ax.set_yticklabels(rs)
-        cbar.set_label(r'Halo mass [log($M_h/M_{\odot}$)]') # cbar.set_label('Redshift')
+        ylabel = r'Halo gain [log($M_h/M_{\odot}$)]'  if colorby == 'massdiff' else r'Halo mass [log($M_h/M_{\odot}$)]' 
+        cbar.set_label(ylabel) # cbar.set_label('Redshift')
     ax.set_xticks([])
 
     return fig
@@ -659,4 +873,135 @@ def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=100):
         'trunc({n},{a:.2f},{b:.2f})'.format(n=cmap.name, a=minval, b=maxval),
         cmap(np.linspace(minval, maxval, n)))
     return new_cmap      
+
+############################################
+# Clustering analysis functions from Chirag
+# THIS SHOULDNT REALLY GO HERE
+############################################
+
+def power(f1, f2=None, boxsize=1.0, k = None, symmetric=True, demean=True, eps=1e-9):
+    """
+    Calculate power spectrum given density field in real space & boxsize.
+    Divide by mean, so mean should be non-zero
+    """
+    if demean and abs(f1.mean()) < 1e-3:
+        #print('Add 1 to get nonzero mean of %0.3e'%f1.mean())
+        f1 = f1*1 + 1
+    if demean and f2 is not None:
+        if abs(f2.mean()) < 1e-3:
+            #print('Add 1 to get nonzero mean of %0.3e'%f2.mean())
+            f2 =f2*1 + 1
+    
+    if symmetric: c1 = np.fft.rfftn(f1)
+    else: c1 = np.fft.fftn(f1)
+    if demean : c1 /= c1[0, 0, 0].real
+    c1[0, 0, 0] = 0
+    if f2 is not None:
+        if symmetric: c2 = np.fft.rfftn(f2)
+        else: c2 = np.fft.fftn(f2)
+        if demean : c2 /= c2[0, 0, 0].real
+        c2[0, 0, 0] = 0
+    else:
+        c2 = c1
+    #x = (c1 * c2.conjugate()).real
+    x = c1.real* c2.real + c1.imag*c2.imag
+    del c1
+    del c2
+    if k is None:
+        k = fftk(f1.shape, boxsize, symmetric=symmetric)
+        k = sum(kk**2 for kk in k)**0.5
+    H, edges = np.histogram(k.flat, weights=x.flat, bins=f1.shape[0]) 
+    N, edges = np.histogram(k.flat, bins=edges)
+    center= edges[1:] + edges[:-1]
+    power = H *boxsize**3 / N
+    power[power == 0] = np.NaN
+    return 0.5 * center,  power
+
+def fftk(shape, boxsize, symmetric=True, finite=False, dtype=np.float64):
+    """ return kvector given a shape (nc, nc, nc) and boxsize 
+    """
+    k = []
+    for d in range(len(shape)):
+        kd = np.fft.fftfreq(shape[d])
+        kd *= 2 * np.pi / boxsize * shape[d]
+        kdshape = np.ones(len(shape), dtype='int')
+        if symmetric and d == len(shape) -1:
+            kd = kd[:shape[d]//2 + 1]
+        kdshape[d] = len(kd)
+        kd = kd.reshape(kdshape)
+
+        k.append(kd.astype(dtype))
+    del kd, kdshape
+    return k
+
+def paintcic(pos, bs, nc, mass=1.0, period=True):
+    mesh = np.zeros((nc, nc, nc))
+    transform = lambda x: x/bs*nc
+    if period: period = int(nc)
+    else: period = None
+    return paint(pos, mesh, weights=mass, transform=transform, period=period)
+
+def paint(pos, mesh, weights=1.0, mode="raise", period=None, transform=None):
+    """ CIC approximation (trilinear), painting points to Nmesh,
+        each point has a weight given by weights.
+        This does not give density.
+        pos is supposed to be row vectors. aka for 3d input
+        pos.shape is (?, 3).
+
+        pos[:, i] should have been normalized in the range of [ 0,  mesh.shape[i] )
+
+        thus z is the fast moving index
+
+        mode can be :
+            "raise" : raise exceptions if a particle is painted
+             outside the mesh
+            "ignore": ignore particle contribution outside of the mesh
+        period can be a scalar or of length len(mesh.shape). if period is given
+        the particles are wrapped by the period.
+
+        transform is a function that transforms pos to mesh units:
+        transform(pos[:, 3]) -> meshpos[:, 3]
+    """
+    pos = np.array(pos)
+    chunksize = 1024 * 16 * 4
+    Ndim = pos.shape[-1]
+    Np = pos.shape[0]
+    if transform is None:
+        transform = lambda x:x
+    neighbours = ((np.arange(2 ** Ndim)[:, None] >> \
+            np.arange(Ndim)[None, :]) & 1)
+    for start in range(0, Np, chunksize):
+        chunk = slice(start, start+chunksize)
+        if np.isscalar(weights):
+          wchunk = weights
+        else:
+          wchunk = weights[chunk]
+        gridpos = transform(pos[chunk])
+        rmi_mode = 'raise'
+        intpos = np.intp(np.floor(gridpos))
+
+        for i, neighbour in enumerate(neighbours):
+            neighbour = neighbour[None, :]
+            targetpos = intpos + neighbour
+
+            kernel = (1.0 - np.abs(gridpos - targetpos)).prod(axis=-1)
+            add = wchunk * kernel
+            #print(f"   i: {i}, wchunk {wchunk}")#add[:5] = {add[:5]}")
+
+            if period is not None:
+                period = np.int32(period)
+                np.remainder(targetpos, period, targetpos)
+
+            if len(targetpos) > 0:
+                targetindex = np.ravel_multi_index(
+                        targetpos.T, mesh.shape, mode=rmi_mode)
+                u, label = np.unique(targetindex, return_inverse=True)
+                mesh.flat[u] += np.bincount(label, add, minlength=len(u))
+                if np.isnan(sum(mesh.flat[u])):
+                    raise ValueError(f"NaN being added to mesh")
+            
+            if np.isnan(np.sum(mesh)):
+                raise ValueError(f"NaNs in mesh")
+
+    return mesh
 

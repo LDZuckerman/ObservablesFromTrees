@@ -26,14 +26,14 @@ def MSE():
 ###  Homemade loss funcs  (all are neg log likelihoods)  ####
 #############################################################
 
-def GaussNd(pred_mu, ys, pred_var):
+def GaussNd(pred_mu, ys, pred_sig):
     '''
     Loss func to fit for sigma as a function of X and feature, assuming guassian errors.
-     - pred_var [n_targ, n_obs] (?): predicted variance of each target, e.g. diagonal of covariance matrix
+     - pred_sig [n_targ, n_obs] (?): predicted std of each target, e.g. diagonal of covariance matrix
     '''
-    z = square((pred_mu-ys)/pred_var)
+    z = square((pred_mu-ys)/pred_sig)
     err_loss = sum(z)/2 
-    sig_loss = sum(log(pred_var))
+    sig_loss = sum(log(pred_sig))
 
     if torch.isnan(sig_loss):
         raise ValueError('Sigloss has become NaN')
@@ -41,7 +41,22 @@ def GaussNd(pred_mu, ys, pred_var):
     return err_loss+sig_loss, err_loss, sig_loss    
 
 
-def Navarro(pred_mu, ys, pred_var):
+def Navarro(pred_mu, ys, pred_sig):
+    '''
+    From Navarro et al. 2020
+    Loss func to fit for sigma as a function of X and feature, BUT allowing targets to have non-guassian errors (they can come from an arbitrary distribution). 
+     - pred_var [n_targ, n_obs] (?): predicted variance of each target, e.g. diagonal of covariance matrix
+    '''
+
+    mu_err = (pred_mu - ys)**2
+    mu_loss = sum(log(sum(mu_err)))
+    #pred_sig = torch.abs(pred_var)**0.5 #pred_sig = pred_var**0.5 # this becomes all nan because pred var contains negatives
+    sig_err = ((pred_mu - ys)**2 - pred_sig**2)**2
+    sig_loss = sum(log(sum(sig_err)))
+
+    return mu_loss + sig_loss, mu_loss, sig_loss
+
+def Navarro2(pred_mu, ys, pred_var):
     '''
     From Navarro et al. 2020
     Loss func to fit for sigma as a function of X and feature, BUT allowing targets to have non-guassian errors (they can come from an arbitrary distribution). 

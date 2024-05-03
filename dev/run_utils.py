@@ -8,20 +8,19 @@ import sklearn.metrics as skmetrics
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
 import pickle
+from sympy import N
 import torch
 import pandas as pd
 import scipy.stats as stats
 from torch.utils.data import DataLoader as DataLoader_notgeom
 from torch_geometric.loader import DataLoader
 from torch import nn
-# sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
-# from dev import data_utils
-#import dev.data_utils as data_utils
+from itertools import product
 try: 
     from dev import data_utils, models, loss_funcs
-except:
+except ModuleNotFoundError:
     sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
-    from ObservablesFromTrees.dev import data_utils, models, loss_funcs
+    from ObservablesFromTrees.dev import data_utils, loss_funcs, models
 
 # Fit transformer to data
 def fit_transformer(allgraphs, featnames, save_path, transfname, plot=True, return_xt=False):
@@ -175,24 +174,27 @@ For comparing to simple MLP
 '''
 def run_simplemodel(taskdir, predict_mu_sig, loss_fn, hidden_layers=1, n_epochs=100, lr=0.1, retrain=False, name=''):
 
+    print(f"Running model {name}")
+
     # Hardcoded parameters 
     datapath = '/mnt/home/lzuckerman/ceph/Data/vol100/'
     dataset = 'DS1'
     data_meta = json.load(open(f"{datapath}{dataset}_meta.json", 'rb'))
     all_labelnames = data_meta[1]['obs meta']['label_names'] 
     all_featnames = data_meta[2]['tree meta']['featnames']
-    use_feats = ['#scale(0)', 'desc_scale(2)', 'Mvir(10)', 'Rvir(11)']
+    use_feats = ['Mvir(10)']
 
     # Create simple dataset (if not already created)
     if not os.path.exists(f'{datapath}{dataset}_finalhalosdata.pkl'):
+        print('Final halos only dataset not already created, creating now')
         usetarg_idxs = [all_labelnames.index(targ) for targ in all_labelnames] 
         used_featidxs = [all_featnames.index(f) for f in all_featnames if f in use_feats]
         allgraphs = pickle.load(open(f"{datapath}{dataset}.pkl", 'rb'))
         traintransformer_path = osp.expanduser(f"{datapath}{dataset}_QuantileTransformer_train.pkl") 
         ft_train = pickle.load(open(traintransformer_path, 'rb')) # SHOULD REALLY BE USING SEPERATE TRANSFORMERS FOR TRAIN AND TEST BUT ACCIDENTALLY DIDNT SAVE TEST ONE YET
-        sm_traindata, sm_testdata = data_utils.data_finalhalos(allgraphs, used_featidxs, usetarg_idxs, ft_train) # data_utils.data_fake()
+        sm_traindata, sm_testdata = data_utils.data_finalhalos(allgraphs, used_featidxs, usetarg_idxs, ft_train, dataset) # data_utils.data_fake()
         pickle.dump((sm_traindata, sm_testdata), open(f'{datapath}{dataset}_finalhalosdata.pkl', 'wb'))
-    
+
     # Get data
     sm_traindata, sm_testdata = pickle.load(open(f'{datapath}{dataset}_finalhalosdata.pkl', 'rb'))
     sm_trainloader = DataLoader_notgeom(sm_traindata, batch_size=256, shuffle=True, num_workers=2)
@@ -225,7 +227,7 @@ def run_simplemodel(taskdir, predict_mu_sig, loss_fn, hidden_layers=1, n_epochs=
     # Save "config" file for future reference 
     config = {'run_params': {'model':name, 'loss_func':loss_fn, 'n_epochs':n_epochs}, 
               'hyper_params': {'hidden_layers':hidden_layers, 'lr':lr},
-              'data_params': {'data_path':'~/ceph/Data/vol100/', 'data_file':'z0', 'use_feats':['#scale(0)', 'desc_scale(2)', 'Mvir(10)', 'Rvir(11)'], 'use_targs':['U', 'B', 'V', 'K', 'g', 'r', 'i', 'z']}}
+              'data_params': {'data_path':'~/ceph/Data/vol100/', 'data_file':f'{dataset}z0', 'use_feats':['#scale(0)', 'desc_scale(2)', 'Mvir(10)', 'Rvir(11)'], 'use_targs':['U', 'B', 'V', 'K', 'g', 'r', 'i', 'z']}}
     json.dump(config, open(f'{modelpath.replace(".pt", "")}_config.json', 'w'))
 
     return ys, preds, metrics
@@ -343,8 +345,7 @@ def get_modelsDF(taskdir):
 
     # Create dict
     models_list = ['MLP1', 'MLP2', 'MLP3'] + [exp for exp in os.listdir(taskdir) if os.path.isdir(os.path.join(taskdir, exp)) and exp.startswith('e') and exp not in ['exp_tiny', 'exp1']]
-    cols = ['exp', 'test rho', 'test rmse', 'test R2', 'test bias', 'val rmse', 'base', 'loss func', 'n epochs', 'stop epoch', 'feats', 'targs', 'DS']
-    models = pd.DataFrame(columns = cols)
+    all_info = []
     
     # Fill with models 
     for model in models_list:
@@ -359,27 +360,116 @@ def get_modelsDF(taskdir):
             except FileNotFoundError:
                 print(f"Ignoreing {model} (has no result_dict.pkl)")
                 continue
-        _, _, test_results = pickle.load(open(resfile, 'rb'))
+        testys, testpreds, test_results = pickle.load(open(resfile, 'rb'))
+        if len(testpreds) ==2 :
+            avg_samp_res = data_utils.get_avg_samp_res(testys, testpreds, n_samples=10)
         vol = config['data_params']['data_path'].replace('~/ceph/Data/','')[:-1]
         ds = config['data_params']['data_file'].replace('.pkl','')
-        info = [model,
-                np.round(np.mean(test_results['rho']),2), # mean over all targets
-                np.round(np.mean(test_results['rmse']),2), # mean over all targets
-                np.round(np.mean(test_results['R2']),2), # mean over all targets
-                np.round(np.mean(test_results['bias']),2), # mean over all targets
-                np.round(np.mean(train_results['val rmse final test']),2) if not 'MLP' in model else '',
-                config['run_params']['model'], 
-                config['run_params']['loss_func'], 
-                config['run_params']['n_epochs'], 
-                train_results['epochexit'] if not 'MLP' in model else '', 
-                config['data_params']['use_feats'], 
-                config['data_params']['use_targs'],
-               f'{vol}, {ds}']
-        models.loc[len(models)] = info
-    models = models.sort_values(by=['test rho', 'test rmse', 'test R2', 'val rmse'], ascending=[False, True, False, True])
+        info = {'exp': model, 
+                'rho': np.round(np.mean(test_results['rho']),2), # mean over all targets
+                'avg samp rho': np.round(np.mean(avg_samp_res['rho']),2) if len(testpreds)==2 else '', # mean over all targets
+                'rmse': np.round(np.mean(test_results['rmse']),2), # mean over all targets
+                'avg samp rmse': np.round(np.mean(avg_samp_res['rmse']),2) if len(testpreds)==2 else '', # mean over all targets
+                'R2': np.round(np.mean(test_results['R2']),2), # mean over all targets, 
+                'avg samp R2': np.round(np.mean(avg_samp_res['R2']),2) if len(testpreds)==2 else '', # mean over all targets
+                'bias': np.round(np.mean(test_results['bias']),2), # mean over all targets
+                'avg samp bais': np.round(np.mean(avg_samp_res['bias']),2) if len(testpreds)==2 else '', # mean over all targets
+                #'val rmse': np.round(np.mean(train_results['val rmse final test']),2) if not 'MLP' in model else '', 
+                'loss func': config['run_params']['loss_func'], 
+                'n epochs': config['run_params']['n_epochs'], 
+                'feats' : config['data_params']['use_feats'], 
+                'targs': config['data_params']['use_targs'], 
+                #'DS': f'{vol}, {ds}'
+                }
+        all_info.append(info)
+
+    models = pd.DataFrame.from_dict(all_info)   
+    models['abs bias'] = np.abs(models['bias']) 
+    models = models.sort_values(by=['rho', 'rmse', 'R2', 'abs bias'], ascending=[False, True, False, False])
+    models.drop(columns=['abs bias'], inplace=True)
+
 
     return models
 
+# Perhaps this should go in loss_funcs at some point, if I use it as one
+
+def MMD(x, y, kernel):
+    """
+    This function is from https://www.onurtunali.com/ml/2019/03/08/maximum-mean-discrepancy-in-machine-learning.html
+
+    Emprical maximum mean discrepancy. 
+    The lower the result the more evidence that distributions are the same.
+
+    Args:
+        x: first sample, distribution P
+        y: second sample, distribution Q
+        kernel: kernel type such as "multiscale" or "rbf"
+    """
+
+    if not isinstance(x, torch.Tensor):
+        x = torch.tensor(np.array(x))
+    if not isinstance(y, torch.Tensor): 
+        y = torch.tensor(np.array(y))
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    xx, yy, zz = torch.mm(x, x.t()), torch.mm(y, y.t()), torch.mm(x, y.t())
+    rx = (xx.diag().unsqueeze(0).expand_as(xx))
+    ry = (yy.diag().unsqueeze(0).expand_as(yy))
+
+    dxx = rx.t() + rx - 2. * xx # Used for A in (1)
+    dyy = ry.t() + ry - 2. * yy # Used for B in (1)
+    dxy = rx.t() + ry - 2. * zz # Used for C in (1)
+
+    XX, YY, XY = (torch.zeros(xx.shape).to(device),
+                  torch.zeros(xx.shape).to(device),
+                  torch.zeros(xx.shape).to(device))
+
+    if kernel == "multiscale":
+
+        bandwidth_range = [0.2, 0.5, 0.9, 1.3]
+        for a in bandwidth_range:
+            XX += a**2 * (a**2 + dxx)**-1
+            YY += a**2 * (a**2 + dyy)**-1
+            XY += a**2 * (a**2 + dxy)**-1
+
+    if kernel == "rbf": # guassian?
+
+        bandwidth_range = [10, 15, 20, 50]
+        for a in bandwidth_range:
+            XX += torch.exp(-0.5*dxx/a)
+            YY += torch.exp(-0.5*dyy/a)
+            XY += torch.exp(-0.5*dxy/a)
+
+    return torch.mean(XX + YY - 2. * XY)
+
+
+'''
+For runnng sweeps
+'''
+
+def get_swp_num(out_pointer):
+
+    swp_nums = [f[f.find('_')+1:f.find('_')+1+f[f.find('_')+1:].find('_')]  for f in os.listdir(out_pointer) if 'res' in f]   # all numeric ids already created for this sweep
+    if len(swp_nums)==0:
+        swp_num = '0'
+    else:
+        swp_num = int(swp_nums[-1]) + 1
+    
+    return swp_num
+
+def make_info_dict(basedict, diffdict):
+
+    info_dict = basedict.copy()
+    for pkey in basedict.keys():
+        for key in basedict[pkey].keys():
+            info_dict[pkey][key] = diffdict[key]
+            
+    return info_dict
+
+def find_next_exp(out_pointer, donefile, sets):
+
+    raise NotImplementedError
 
 '''
 NOT USED
@@ -407,8 +497,9 @@ def clean_done(folder):
         os.mkdir(experiment_folder)
     print('Cleaned done folder')
 
-##makes permutations of dict of lists very fast
+# makes permutations of dict of lists very fast
 def perms(diffs):
+    
     from itertools import product
     keys=list(diffs.keys())
     val=list(diffs.values())
@@ -429,4 +520,5 @@ def perms(diffs):
                 output.append(i)
     removeNestings(bs)
     perms=np.array(output)
+
     return perms.reshape(-1, len(keys))

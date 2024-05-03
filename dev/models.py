@@ -33,11 +33,11 @@ class Sage(Module):
         Most other things can be customized at wish, e.g. activation functions for which ReLU and LeakyReLU can be used'''
         self.encode=encode
         if self.encode:
-            self.node_enc = MLP(in_channels, hidden_channels, layer_norm=True) # could turn up hidden states
+            self.node_enc = MLP(in_channels, hidden_channels, layer_norm=True) 
         self.decode_activation=decode_activation
         self.conv_activation=conv_activation
         self.layernorm=layernorm
-        self.in_channels=in_channels
+        self.in_channels=int(in_channels)
         self.out_channels=out_channels
         self.hidden_channels=hidden_channels
         self.predict_sig=get_sig

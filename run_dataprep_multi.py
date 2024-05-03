@@ -5,11 +5,10 @@ import pickle, json
 import numpy as np
 from datetime import date
 from dev import data_utils
+import multiprocessing as mp
 
 '''
-Note: This script will take ~xx hr, so to remove the need for repeat runs:
-  - all CTrees columns are saved in tree files
-  - all feature columns are saved in graph files
+Same as run_dataprep.py but with multiprocessing
 '''
 
 # Read in arguements 
@@ -18,7 +17,6 @@ parser.add_argument("-DS_name", "--DS_name", type=str, required=True)
 parser.add_argument("-out_basepath", "--out_basepath", type=str, required=False, default='~/ceph/Data/')
 parser.add_argument("-tng_vol", "--tng_vol", type=str, required=True)
 parser.add_argument("-downsize_method", "--downsize_method", type=str, required=False, default=3)
-parser.add_argument("-testobs", "--testobs", type=bool, required=False, default=False)
 parser.add_argument("-tinytreetest", "--tinytreetest", type=bool, required=False, default=False)
 parser.add_argument("-sizelim", "--sizelim", required=False, default='None')
 parser.add_argument("-reslim", "--reslim", required=False, default=100)
@@ -69,8 +67,7 @@ if not osp.exists(treefile):
     print(f'\tLoading photometric data from {obsfile}', flush=True)
     with open(obsfile, 'rb') as f:
         allobs = pickle.load(f)
-    if args.testobs: data_utils.prep_mhaloz0(ctrees_path, mstar_ids=list(allobs.keys()), save_path=treefile)
-    else: data_utils.prep_trees(ctrees_path, featnames, phot_ids=list(allobs.keys()), metafile=metafile, save_path=treefile, sizelim=sizelim, tinytest=args.tinytreetest, downsize_method=args.downsize_method)
+    data_utils.prep_trees(ctrees_path, featnames, phot_ids=list(allobs.keys()), metafile=metafile, save_path=treefile, sizelim=sizelim, tinytest=args.tinytreetest, downsize_method=args.downsize_method)
 else:
     print(f'Tree data already exists in {treefile}', flush=True)
 

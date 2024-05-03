@@ -26,6 +26,8 @@ import networkx as nx
 from itertools import count
 import io
 from sklearn.model_selection import train_test_split
+import scipy.stats as stats
+import sklearn.metrics as skmetrics
 
 # Make dictionary of (cm_ID, tree DF) for all trees
 def prep_trees(ctrees_path, featnames, phot_ids, metafile, save_path, zcut=('before', np.inf), Mlim=10, sizelim=np.inf, tinytest=False, downsize_method=3): 
@@ -40,10 +42,10 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, save_path, zcut=('bef
     # Initialize meta dict and tree dicts
     all_trees = {}
     meta = {'featnames': featnames,
-            'zcut': str(zcut), 'Mlim': str(Mlim), 'sizelim': str(sizelim),
+            'Mlim': str(Mlim), 'sizelim': str(sizelim), 'zcut': str(zcut), 
+            'downsize method': downsize_method,
             'tot trees': 0, 'tot trees saved': 0,
             'trees mass cut': 0, 'trees sat cut': 0, 'trees size cut': 0, 'trees no mergers cut': 0,
-            'downsize method': downsize_method,
             'start stamp': str(datetime.now())}
     
     # Add tree dataframes to all_trees dict
@@ -83,20 +85,23 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, save_path, zcut=('bef
             lowmass = halo_z0['Mvir(10)'] <= Mlim # if final halo too low mass
             satelite = halo_z0['pid(5)'] != '-1' # if not central
             SFcut = rstar_id not in phot_ids # if cut based on SF criteria (e.g. not central according to SF, or low resolution)
-            toolong = len(haloset) > sizelim # Christian cut out those over 20000, but Rachel says not to
-            nomergers = len(haloset[haloset[:,4]>1]) == 0
-            if (toolong or lowmass or satelite or SFcut or nomergers): 
-                #reason = f"too many halos ({len(haloset)})" if toolong else f"not central (pid = {halo_z0['pid(5)']})" if satelite else f"not massive enough (Mvir = {halo_z0['Mvir(10)']})" if lowmass else "not central according to SF" if SFcut else else "no mergers" if nomergers else "SHOULD NOT HAVE BEEN CUT"
-                # print(f"\t\t\tIgnoreing haloset {i}") #becasue {reason}", flush=True)
+            toolong = len(haloset) > float(sizelim) # Christian cut out those over 20000, but Rachel says not to
+            # nomergers = len(haloset[haloset[:,4]>1]) == 0
+            if (toolong or lowmass or satelite or SFcut): # or nomergers): 
                 if lowmass: meta['trees mass cut'] += 1
                 if satelite: meta['trees sat cut'] += 1
                 if toolong: meta['trees size cut'] += 1
-                if nomergers: meta['trees no mergers cut'] += 1
                 continue
             # print(f'\t\t\tProcessing haloset {i} into tree', flush=True)
             tcount += 1
             # Remove "unimportant" subhalos and add newdesc_id with updated descendents
-            dtree = downsize_func(tree, num=i)
+            if downsize_method != 'None':
+                t0downsize = time.time()
+                dtree = downsize_func(tree, num=i)
+                print(f"\t\tDownsized tree {i} (len {len(tree)}) in {np.round(time.time()-t0downsize, 4)}s", flush=True)
+            else: 
+                dtree = tree
+                dtree['newdesc_id'] = dtree['desc_id(3)']
             dtree = dtree.rename(columns={'desc_id(3)': 'olddesc_id'}) # rename desc_id to olddesc_id
             # Add (rstar_id , tree) to dicts
             all_trees[rstar_id] = dtree
@@ -128,6 +133,10 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, save_path, zcut=('bef
 
 # Make dictionary of (subhalo, phot) for all central subhalos
 def prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile, save_path, reslim=100):
+    # Should I store mstar and res as well? 
+    #   Would it make later access easier?
+    #   Won't help for looking at other targs, and would still need to re-map to trees, since dont want graphs to include things other)
+    #   And already saved in subfind_othertargs.pkl for res = 100 and ctrl cut, which I will probabaly always want
 
     meta = {'label_names': ["U", "B", "V", "K", "g", "r", "i", "z"], 'reslim': reslim, # Note: had a typo swapping V and B, but I've fixed that
             'tot galaxies': 0, 'tot galaxies saved': 0, 
@@ -149,16 +158,15 @@ def prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile, save_path,
     ctl_idxs = groups['GroupFirstSub'] # for each group, the idx w/in "subhalos" that is its central subhalo (-1 if group as no subhalos)
     ctl_idxs = ctl_idxs[ctl_idxs != -1] # remove groups with no subhalos
     meta['galaxies sat cut'] = len(sh_phot) - len(ctl_idxs)
-    print(f'\tTotal of {len(sh_phot)} subhalos, with {len(ctl_idxs)} being central', flush=True)  
 
     # Add photometry for all central subhalos to dict
-    all_phot = {}
+    all_phot = {} 
     for idx in ctl_idxs:
         # Remove if not central or resolution too low
         if (sh_res[idx] < reslim): 
             meta['galaxies res cut'] += 1
             continue
-        # Get rstar_id for matching to tree
+        # Get rstar_id for matching to trees
         subfind_read_idx =  idx
         rstar_read_idx = cmRSSF_list[subfind_read_idx]
         rstar_id = int(rstar_subhalo_ids[rstar_read_idx])
@@ -185,7 +193,7 @@ def prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile, save_path,
     return all_phot        
 
 # Combine prepared trees and TNG subfind photometry into pytorch data objects
-def make_graphs(alltrees, allphot, featnames, metafile, save_path): 
+def make_graphs(alltrees, allobs, featnames, metafile, save_path): 
     '''
     Combine trees and corresponding targets into graph data objects
     NOTE: decide if best to apply fitted transformer here, or later (not going to do it in prep_trees to allow more flexibility')
@@ -197,7 +205,6 @@ def make_graphs(alltrees, allphot, featnames, metafile, save_path):
     # Combine trees and corresponding targets into data object  # data_z.py 205 - 295
     print(f'\tCombining trees and targets ({len(list(alltrees.keys()))} total) into full data object', flush=True)
     dat = []
-    count = 1
     for rstar_id in list(alltrees.keys()): # Loop through tree keys becasue tree dict wont have any keys not in obs dict
         tree = alltrees[str(rstar_id)]
         #print(f"\t   Tree {count} (rockstar ID {rstar_id}), {len(tree)} halos", flush=True); count += 1
@@ -205,14 +212,17 @@ def make_graphs(alltrees, allphot, featnames, metafile, save_path):
         data = np.array(tree[featnames], dtype=float)
         X = torch.tensor(data, dtype=torch.float) 
         # Create y tensor 
-        targs = allphot[rstar_id]
+        targs = allobs[rstar_id]
         y = torch.tensor(targs, dtype=torch.float) 
         # Create edge_index tensor # Should just have one tuple for every prog in the tree (all haloes except last), right? Like, should be n_halos - 1 progs, right?
         progs = []
         descs = []
         for i in range(len(tree)):
             halo = tree.iloc[i]
-            desc_id = halo['newdesc_id'] 
+            try:
+                desc_id = halo['newdesc_id'] 
+            except KeyError:
+                desc_id = halo['olddesc_id'] # forgot to rename desc_id to newdesc_id in prep_trees, and then acidentally did keep the rename to olddesc_id
             if (desc_id != '-1'): # this halo has a desc (not the final halo)
                 # try: print(f"\t      halo {i}, desc_id {desc_id}, desc_pos {np.where(tree['id(1)']==desc_id)}")
                 # except: print(f"\t      halo {i}, desc_id {desc_id}")
@@ -230,7 +240,7 @@ def make_graphs(alltrees, allphot, featnames, metafile, save_path):
         graph = Data(x=X, edge_index=edge_index, edge_attr=edge_attr, y=y)
         dat.append(graph)  
         meta['num graphs'] += 1 
-        #print(f'\t\tDone with tree. Time elapsed {time.time()-start} s', flush=True)
+        print(f"\t\tDone with tree {meta['num graphs']}. Tree length {len(tree)}. Took {time.time()-start} s", flush=True)
                 
     # Save pickled dataset
     print(f'Saving dataset to {save_path} and adding meta to {metafile}', flush=True) 
@@ -247,6 +257,20 @@ def make_graphs(alltrees, allphot, featnames, metafile, save_path):
     f.close()
 
     return dat
+
+def make_edges(tree):
+
+    progs = []; descs = []
+    for i in range(len(tree)):
+        halo = tree.iloc[i]
+        try: desc_id = halo['newdesc_id'] 
+        except KeyError: desc_id = halo['olddesc_id'] # forgot to rename desc_id to newdesc_id in prep_trees, and then acidentally did keep the rename to olddesc_id
+        if (desc_id != '-1'): 
+            desc_pos = np.where(tree['id(1)']==desc_id)[0][0] 
+            progs.append(i)
+            descs.append(desc_pos) 
+
+    return progs, descs
 
  # Collect other targets for the same galaxies as in the photometry
 def collect_othertargs(obscat_path, alltrees, volname, save_path, reslim=100):
@@ -294,7 +318,7 @@ def collect_othertargs(obscat_path, alltrees, volname, save_path, reslim=100):
     print(f'\tTotal of {len(sh_res)} subhalos, with {len(ctl_idxs)} being central', flush=True)  
 
     # Add photometry for all central subhalos to dict [analogous to prep_phot]
-    all_targs =  pd.DataFrame(columns=['rstar_id']+list(to_store.keys()))
+    all_targs = pd.DataFrame(columns=['rstar_id']+list(to_store.keys()))
     galaxies_res_cut = 0 # for checking that the same cuts are being applied as in prep_phot
     galaxies_saved = 0 # for checking that the same cuts are being applied as in prep_phot
     for idx in ctl_idxs:
@@ -723,6 +747,134 @@ def downsize_tree3(tree, num, debug=False):
     return tree_out
 
 
+
+def downsize_tree4(tree, num, debug=False):
+    '''
+    Same as downsize_tree3, except also retaining nodes if there is significant mass change
+    '''
+
+    #print(f"\t\t\t   Downsizing ({len(tree)} -->", end='', flush=True)
+
+    nprogcol = tree.columns.get_loc('num_prog(4)')
+    descidcol = tree.columns.get_loc('desc_id(3)')
+    idcol = tree.columns.get_loc('id(1)')
+    masscol = tree.columns.get_loc('Mvir(10)')
+
+    halmix = []
+
+    atree= np.array(tree) # halwgal[n]
+    roots = atree[atree[:,nprogcol]==0] # yup num_prog still at 4 
+    mergers = atree[atree[:,nprogcol]>1]
+    final = atree[atree[:,descidcol]=='-1']
+    des = []; #pro = []; discarded = []; premerger_id = []
+    finalid = final[0][idcol] # [0] because atree[row] will give list inside a list
+        
+    hrc = -1; drc = -1
+    if debug: print(f"\n")
+    if finalid not in mergers[:,idcol]: # IF FIRST HALO (FINAL HALO) IS NOT A MERGER (ONLY 1 DESC) IT ALSO WONT BE A ROOT SO IT WILL NEVER GET ADDED... 
+        halmix.append(final[0]); hrc += 1
+        des.append(final[0][descidcol]); drc += 1
+        if debug:
+            print(f"Final halo {finalid} is not a merger, so adding it here")
+            print(f"  Adding it to halmix [halmix row {hrc}]") 
+            print(f"  Adding its desc id {final[0][descidcol]} to des [des row {drc}]")
+    if debug: print(f"Looping through roots and mergers")
+    for q, mid in enumerate(mergers[:,idcol]): # for each halo that is a merger
+        if debug: print(f"Halo {mid} is merger {q} (descid {atree[:,descidcol][np.where(mid==atree[:,idcol])][0]})")
+        halmix.append(mergers[q]); hrc +=1 
+        if debug: print(f"  Adding it to halmix [halmix row {hrc}]") 
+        k=1
+        descid = atree[:,descidcol][np.where(mid==atree[:,idcol])][0] # this halo's descendent id
+        mass = atree[:,masscol][np.where(mid==atree[:,idcol])][0] # this halo's mass
+        while descid not in mergers[:,idcol] and descid!='-1' and deltaM < min_deltaMm: # if this halos desc is not a merger, final, or big mass change, find the next halo who's desc is merger, final, or big mass change and assign it to be this halos be this halos new desc
+            proid = atree[:,idcol][np.where(descid==atree[:,idcol])][0] # get the id of the prog of this halo's descendent (want to keep the progs of mergers - could this get moved outside while loop and just get it if this halo's desc is a merger?)   # added [0] 
+            descid = atree[:,descidcol][np.where(descid==atree[:,idcol])][0] # look at this halo's descendent's descendent   # added [0] # desc id of halos desc  ##new descendant id where current descendant id = halo id
+            deltaM = mass - atree[:,masscol][np.where(descid==atree[:,idcol])][0] 
+            k += 1
+        if k>1 and proid != finalid: # if original desc of this merger was not a merger but its new desc is (as opposed to new desc being final (this is same as descid != -1, right?))
+            des.append(proid); drc += 1
+            halmix.append(atree[np.where(proid==atree[:,idcol])][0]); hrc +=1
+            if debug:
+                print(f"  Its original desc is not a merger or final, and this new desc is merger, not final")
+                print(f"     Adding id of its new desc ('proid' {proid}) to des [des row {drc}]") # Add halo's new desc id at corresponding des index
+                print(f"     Adding its new desc (halo at 'proid') to halmix [halmix row {hrc}]") # Add new descendent to halmix
+        if descid!='-1': # if desc of [this merger]/[this mergers new desc] is not final (is a merger)
+            des.append(descid); drc +=1 # Add [id of desc]/[id of new desc's desc] to des at [idx correponding to this merger]/[idx corresponding to new desc] # removed [0]
+            if debug: print(f"  Adding {'new' if k>1 else 'original'} descid {descid} to des [des row {drc}]") 
+        else: # descid==-1, e.g. either didnt enter while loop or entered and found final
+            if k == 1:
+                des.append(atree[:,descidcol][np.where(mid==atree[:,idcol])][0]); drc += 1 # ADD ORIGINAL DESC??? THAT ONLY WORKS IF DIDNT ENTER WHILE (E.G. PROG OF FINAL IS MERGER, AND WE ARE ON THAT MERGER)
+                if debug: print(f"  Adding original desc id {atree[:,descidcol][np.where(mid==atree[:,idcol])][0]} to des [des row {drc}]")
+            else: 
+                des.append(finalid); drc += 1 # Add id of new desc's desc (final) to des at idx corresponding to new desc
+                if debug: print(f"  Adding new descid (final halo {proid} to des [des row {drc}]")
+                if proid != finalid: print(f"Error: entered loop and found final, but proid {proid} != finalid {finalid}"); a=b
+        
+        if hrc != drc: print(f"Error: hrc {hrc} != drc {drc}"); a=b
+        if len(halmix[-1]) != len(list(tree.columns)):
+            print(f"\n[haloset {num}] Error at halmix row {hrc} (after proccessing merger {q}) has length {len(halmix[-1])} not n feats {len(list(tree.columns))} \n\thalmix[-1] {halmix[-1]}"); a=b
+
+    c = 0     
+    for r in roots: # for each halo that is a root
+        #print(f"Halo {r[idcol]} is root {c} (descid {atree[:,descidcol][np.where(r[idcol]==atree[:,idcol])][0]})")
+        halmix.append(r); hrc +=1 
+        #print(f"  Adding it to halmix [halmix row {hrc}]")
+        descid=atree[:,descidcol][np.where(r[idcol]==atree[:,idcol])][0] 
+        mass=atree[:,masscol][np.where(r[idcol]==atree[:,idcol])][0]
+        k=1
+        while descid not in mergers[:,idcol] and descid!='-1' and deltaM < min_deltaM: # could remove descid!=-1 right? root should never go directly to final
+            proid = atree[:,idcol][np.where(descid==atree[:,idcol])][0] 
+            descid = atree[:,descidcol][np.where(descid==atree[:,idcol])][0]
+            deltaM = mass - atree[:,masscol][np.where(descid==atree[:,idcol])][0] 
+            k+=1
+        if k>1 and proid!=finalid: # if it entered the above while loop (desc of this merger is not a merger?) and progenitor is not the final halo (?)
+            halmix.append(atree[np.where(proid==atree[:,idcol])][0]); hrc +=1 
+            des.append(proid); drc += 1
+            if debug:
+                print(f"  Its original desc is not a merger or final, and new proid is also not final")
+                print(f"     Adding halo at new 'proid' to halmix [halmix row {hrc}]")
+                print(f"     Adding new 'proid' {proid} to des [des row {drc}]")
+        if descid!='-1':
+            des.append(descid); drc +=1 
+            if debug: print(f"  Adding {'new' if k>1 else 'original'} {descid} to des [des row {drc}]")
+        else: # descid==-1, e.g. didn't enter loop (dont need to worry about finding final as next desc of a root)
+            des.append(atree[:,descidcol][np.where(r[idcol]==atree[:,idcol])][0]); drc += 1
+            if debug: print(f"  Adding original desc id {atree[:,descidcol][np.where(mid==atree[:,idcol])][0]} to des [des row {drc}]") 
+
+        if hrc != drc: print(f"Error: hrc {hrc} != drc {drc}"); a=b
+        if len(halmix[-1]) != len(list(tree.columns)):
+            print(f"\n[haloset {num}] Error: row at at halmic row {hrc} (after proccessing root {c}) has length {len(halmix[-1])} not n feats {len(list(tree.columns))} \n\thalmix[-1] {halmix[-1]}"); a=b
+
+        c += 1
+    
+    tree_out = pd.DataFrame(halmix, columns=tree.columns)
+    tree_out['newdesc_id'] = des
+
+    for i in range(len(tree_out)):
+        if not (tree_out.iloc[i]['newdesc_id'] in list(tree_out['id(1)']) or tree_out.iloc[i]['newdesc_id'] == '-1'): # this halos original descendent was cut without updateing this halos descendent 
+            print(f"\n[haloset {num}] Error at row {i}: no halos in the tree have this halo's descdendent ({tree_out.iloc[i]['newdesc_id']})");
+            print(f"\nhalo: {list(tree_out.iloc[i])}")
+            print(f"\tlist(tree_out['id(1)'])[0:5]: {list(tree_out['id(1)'])[0:5]}")
+            print(f"\tlist(tree_out['newdesc_id'])[0:5]: {list(tree_out['newdesc_id'])[0:5]}")
+            a=b
+
+    try: 
+        np.array(tree_out, dtype=float)
+    except: 
+        print(f"[haloset {num}] Cant set tree_out to array")
+        for i in range(len(halmix)):
+            try: np.array(tree_out.iloc[i], dtype=float)
+            except: 
+                print(f"[haloset {num}] Error at row {i}")
+                print(f"halmix[i] \n{halmix[i]} \nhalmix[i+1] \n{halmix[i+1]}")
+                print(f"tree_out.iloc[i] \n{list(tree_out.iloc[i])} \ntree_out.iloc[i+1] \n{list(tree_out.iloc[i+1])}")
+                a=b
+
+    #print(f"{len(halmix)})", flush=True) 
+
+    return tree_out
+
+
 ###################
 # Debuging functions
 ###################
@@ -945,7 +1097,7 @@ class SimpleData(Dataset_notgeom):
   def __len__(self):
     return self.len
 
-def data_finalhalos(allgraphs, use_featidxs, use_targidxs, ft_train): 
+def data_finalhalos(allgraphs, use_featidxs, use_targidxs, ft_train, dataset): 
     
     X = []; Y = []
     for graph in allgraphs:
@@ -953,7 +1105,21 @@ def data_finalhalos(allgraphs, use_featidxs, use_targidxs, ft_train):
         x = ft_train.transform(x).squeeze()
         X.append(x[use_featidxs].astype(np.float32))
         Y.append(graph.y[use_targidxs].detach().numpy().astype(np.float32))
-    X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.33, random_state=42)
+    
+    #X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.33, random_state=42)
+    testidx_file = osp.expanduser(f'../Data/vol100/{dataset}_testidx20.npy') # probably unlikely I'll change split
+    print(f'   Loading test indices from {testidx_file}', flush=True)
+    testidx = np.array(np.load(testidx_file))
+    X_train, Y_train = [], []
+    X_test, Y_test = [], []
+    for i in range(len(X)):
+        if i in testidx:
+            X_test.append(X[i])
+            Y_test.append(Y[i])
+        else:
+            X_train.append(X[i])
+            Y_train.append(Y[i])
+
     traindata = SimpleData(X_train, Y_train)
     testdata = SimpleData(X_test, Y_test)
   
@@ -983,3 +1149,41 @@ def propsdata_finalhalos(props_data, use_featidxs, use_targidxs):
     testdata = SimpleData(X_test, Y_test)
   
     return traindata, testdata
+
+
+def get_yhats(preds, sample=False):
+
+    sampled = False
+    if len(preds) == 2: 
+        muhats = preds[0]
+        if sample:
+            sigmahats = preds[1]
+            yhats = np.random.normal(muhats, sigmahats)
+            sampled = True
+        else: 
+            yhats = muhats
+    else: 
+        yhats = preds
+
+    return yhats, sampled
+
+def get_avg_samp_res(ys, preds, n_samples):
+
+    if len(preds) != 2: 
+        raise ValueError('Doesnt look like predictions are from a distribution-predicing model')
+    muhats = preds[0]
+    sigmahats = preds[1]
+    rhos =[]; rmses = []; R2s = []; biases = []
+    for n in range(n_samples):
+        yhats = np.random.normal(muhats, sigmahats)
+        rmses.append(np.std(yhats - ys, axis=0)) # RMSE for each targ
+        rhos.append(np.array([stats.pearsonr(ys[:,i], yhats[:,i]).statistic for i in range(ys.shape[1])])) # Pearson R for each targ
+        R2s.append(np.array([skmetrics.r2_score(ys[:,i], yhats[:,i]) for i in range(ys.shape[1])])) # coefficient of determination
+        biases.append(np.mean(ys-yhats, axis=0))
+
+    res = {'rho':np.mean(rhos, axis=0), # mean over all samples
+           'rmse':np.mean(rmses, axis=0), # mean over all samples
+           'R2':np.mean(R2s, axis=0), # mean over all samples
+           'bias':np.mean(biases, axis=0)} # mean over all samples
+
+    return res
