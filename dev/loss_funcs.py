@@ -1,6 +1,10 @@
 from uu import Error
+from pytools import F
+import torch
+from torch import log_
 from torch.nn import MSELoss, L1Loss, SmoothL1Loss
 from torch import log, sum, square, vstack, zeros, bmm, det, inverse
+import numpy as np
 
 
 ###############################
@@ -15,89 +19,67 @@ def L1():
 def SmoothL1():
     return SmoothL1Loss(beta=0.5)
 
-###############################
-###  Homemade loss funcs   ####
-##########################################
-###  All are negative log likelihoods   ####
-##########################################
+def MSE():
+    return MSELoss()
 
-def GaussNd(pred, ys, var):
-    '''General uncorrelated gaussian, if you're having trouble you can try adding a small number to your sigmas'''
-    z = (pred-ys)/var 
-    sigloss = sum(log(var))
-    err_loss = sum((square(z)))/2 
-    
-    return err_loss+sigloss, err_loss, sigloss    
+#############################################################
+###  Homemade loss funcs  (all are neg log likelihoods)  ####
+#############################################################
 
-def Gauss2d(pred, ys, var): # If predicting exactly 2 targets?
-    '''2d Gaussian, can be subbed for GaussND'''
-    sig1=var[:,0]
-    sig2=var[:,1]
-    z1=(pred[:,0]-ys[:,0])/sig1
-    z2=(pred[:,1]-ys[:,1])/sig2
-    sigloss=sum(log(sig1)+log(sig2))
-    err_loss = sum((z1**2+z2**2)/2)
-    
-    return err_loss+sigloss, err_loss, sigloss
-
-def Gauss1d(pred, ys, sig): # If predicting exactly 1 target?
-    '''1d Gaussian, can be subbed for GaussND'''
-    z=(pred-ys)/sig
-    sigloss = sum(log(sig))
-    err_loss = sum(z**2)/2
-    
-    return err_loss+sigloss, err_loss, sigloss
-
-def dist_loss(pred_mu, pred_var, ys):
+def GaussNd(pred_mu, ys, pred_sig):
     '''
-    Attempt to implement loss func for model predicting mean and var instead of y
+    Loss func to fit for sigma as a function of X and feature, assuming guassian errors.
+     - pred_sig [n_targ, n_obs] (?): predicted std of each target, e.g. diagonal of covariance matrix
     '''
+    z = square((pred_mu-ys)/pred_sig)
+    err_loss = sum(z)/2 
+    sig_loss = sum(log(pred_sig))
+
+    if torch.isnan(sig_loss):
+        raise ValueError('Sigloss has become NaN')
+    
+    return err_loss+sig_loss, err_loss, sig_loss    
+
+
+def Navarro(pred_mu, ys, pred_sig):
+    '''
+    From Navarro et al. 2020
+    Loss func to fit for sigma as a function of X and feature, BUT allowing targets to have non-guassian errors (they can come from an arbitrary distribution). 
+     - pred_var [n_targ, n_obs] (?): predicted variance of each target, e.g. diagonal of covariance matrix
+    '''
+
     mu_err = (pred_mu - ys)**2
-    t1 = sum(log(sum(mu_err)))
-    pred_sig = pred_var**0.5
+    mu_loss = sum(log(sum(mu_err)))
+    #pred_sig = torch.abs(pred_var)**0.5 #pred_sig = pred_var**0.5 # this becomes all nan because pred var contains negatives
     sig_err = ((pred_mu - ys)**2 - pred_sig**2)**2
-    t2 = sum(log(sum(sig_err)))
+    sig_loss = sum(log(sum(sig_err)))
 
-    return t1 + t2
+    return mu_loss + sig_loss, mu_loss, sig_loss
 
-def GuassNd_corr():
+def Navarro2(pred_mu, ys, pred_var):
+    '''
+    From Navarro et al. 2020
+    Loss func to fit for sigma as a function of X and feature, BUT allowing targets to have non-guassian errors (they can come from an arbitrary distribution). 
+     - pred_var [n_targ, n_obs] (?): predicted variance of each target, e.g. diagonal of covariance matrix
+    '''
 
-    raise Error('Not implemented yet')
+    mu_err = (pred_mu - ys)**2
+    mu_loss = sum(log(sum(mu_err)))
+    pred_sig = torch.abs(pred_var)**0.5 #pred_sig = pred_var**0.5 # this becomes all nan because pred var contains negatives
+    sig_err = ((pred_mu - ys)**2 - pred_sig**2)**2
+    sig_loss = sum(log(sum(sig_err)))
 
+    return mu_loss + sig_loss, mu_loss, sig_loss
 
-def Gauss2d_corr(pred, ys, var, rho): # If predicting exactly 2 targets?
-    sig1=var[:,0]
-    sig2=var[:,1]
-    z1=(pred[:,0]-ys[:,0])/sig1
-    z2=(pred[:,1]-ys[:,1])/sig2
-    sigloss=sum(log(sig1)+log(sig2))
-    rholoss=sum(log(1-rho**2)/2)
-    factor=1/(2*(1-rho**2))
-    err_loss = sum(factor*(z1**2+z2**2-2*rho*z1*z2))
+def GuassNd_corr(pred_mu, ys, pred_cov):
+    '''
+    Loss func to fit for sigma as a function of X and feature, assuming guassian errors and allowing covariance of features.
+     - pred_cov [n_targ, n_targ, n_obs] (?): predicted covariance of each target
+    '''
+
+    # # chol = torch.cholesky(pred_cov)
+    # # mu_err = (pred_mu - ys)**2
+    # y_dist = torch.distributions.MultivariateNormal(pred_mu, pred_cov)  
+    # log_prob = y_dist.log_prob(ys) # ??????
     
-    return err_loss+sigloss+rholoss, err_loss, sigloss, rholoss
-
-def Gauss4d_corr(pred, ys, sig, rho): # If predicting exactly 4 targets?
-    '''This is written assuming normal pytorch, on cuda, inputs should be 4xbatchsize, 4xbatchsize, 4xbatchsize, 6xbatchsize'''
-    delta=pred-ys
-    bsize = delta.shape[0]
-    N = delta.shape[1] # this would have to be 4, right? 
-    #this is messy but it works 
-    #compute the covariance matrix
-    vals = vstack([sig[:,0]**2, rho[:,0]*sig[:,0]*sig[:,1], rho[:,1]*sig[:,0]*sig[:,2], rho[:,2]*sig[:,0]*sig[:,3],\
-                 sig[:,1]**2,rho[:,3]*sig[:,1]*sig[:,2], rho[:,4]*sig[:,1]*sig[:,3], \
-                sig[:,2]**2,rho[:,5]*sig[:,2]*sig[:,3],\
-                 sig[:,3]**2])
-    A = zeros(N, N,bsize, device='cuda:0') # assuming you're on the gpu
-    A[0] = vals[:4]
-    A[1] = vstack([vals[1], vals[4:7]])
-    A[2] = vstack([vals[2], vals[5], vals[7:9]])
-    A[3] = vstack([vals[3], vals[6], vals[8], vals[9]])
-    A2=A.permute(2,0,1)
-    dethat = det(A2)
-    detloss = sum(log(dethat))/2
-    sig_inv = inverse(A2)
-    err=delta*bmm(sig_inv, delta.unsqueeze(2))[:,:,0]
-    err_loss = sum(err)/2
-    
-    return err_loss+detloss, err_loss, detloss
+    raise NotImplementedError('Loss function not yet implemented')

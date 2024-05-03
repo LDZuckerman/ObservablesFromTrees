@@ -18,7 +18,7 @@ module purge
 module load python
 module load gcc
 module load cuda
-source ~/VENVS/torch_env/bin/activate
+source ~/VENVS/torch_env2/bin/activate
 
 redo='False'
 
