@@ -21,10 +21,11 @@ while getopts "n:v:s:r" flag; do
    v) tng_vol=$OPTARG;;
    s) sizelim=$OPTARG;;
    r) reslim=$OPTARG;;
+   d) downsize_method=$OPTARG;; 
  esac
 done
 
-srun python ObservablesFromTrees/run_dataprep.py -DS_name $DS_name -tng_vol $tng_vol -sizelim $sizelim -reslim $reslim
+srun python ObservablesFromTrees/run_dataprep.py -DS_name $DS_name -tng_vol $tng_vol -sizelim $sizelim -reslim $reslim -downsize_method $downsize_method
 
 ####
 # In parent directory of ObservablesFromTrees, run 'sbatch ObservablesFromTrees/run_dataprep.sh -n DS3 -v 300 -s 20000'

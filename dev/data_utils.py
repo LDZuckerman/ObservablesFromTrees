@@ -10,6 +10,7 @@ from sympy import half_gcdex
 import torch
 from torch import half
 os.environ['TORCH'] = torch.__version__
+from torch import set_anomaly_enabled
 import torch_geometric as tg
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Data
@@ -20,48 +21,89 @@ import pandas as pd
 import h5py
 from IPython.display import display
 import json
-import matplotlib.pyplot as plt
-from matplotlib import cm
-import networkx as nx
-from itertools import count
 import io
 from sklearn.model_selection import train_test_split
 import scipy.stats as stats
 import sklearn.metrics as skmetrics
+import multiprocessing as mp
 
 # Make dictionary of (cm_ID, tree DF) for all trees
-def prep_trees(ctrees_path, featnames, phot_ids, metafile, save_path, zcut=('before', np.inf), Mlim=10, sizelim=np.inf, tinytest=False, downsize_method=3): 
+def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('before', np.inf), Mlim=10, sizelim=np.inf, tinytest=False, downsize_method=3, multi=False, min_pctGain=''): 
           
     # Prepare to load tree data 
     tree_path = osp.expanduser(ctrees_path)
     #loadcols = [allnames.index(name) for name in allnames if name not in ignorenames] # col idxs to load (remove ignorenames)
     print(f'\tTree features to include: {featnames}', flush=True)
-    downsize_func = downsize_tree3 if downsize_method == 3 else downsize_tree1 if downsize_method == 1 else None
-    print(f'\tWill use downsize method {downsize_method}', flush=True)
-
-    # Initialize meta dict and tree dicts
-    all_trees = {}
-    meta = {'featnames': featnames,
-            'Mlim': str(Mlim), 'sizelim': str(sizelim), 'zcut': str(zcut), 
+ 
+    # Initialize meta dict
+    meta = {'Mlim': str(Mlim), 'sizelim': str(sizelim), 'zcut': str(zcut), 
             'downsize method': downsize_method,
-            'tot trees': 0, 'tot trees saved': 0,
-            'trees mass cut': 0, 'trees sat cut': 0, 'trees size cut': 0, 'trees no mergers cut': 0,
+            'min_pctGain': min_pctGain,
+            'lognames': ['Mvir(10)', 'Mvir_all', 'M200b', 'M200c', 'M2500c', 'M_pe_Behroozi', 'M_pe_Diemer'], 
+            'minmaxcols': ['Jx(23)', 'Jy(24)', 'Jz(25)'],
             'start stamp': str(datetime.now())}
     
-    # Create list of filesets
-    t0 = time.time()
-    fcount = 0
+    # Load files
+    t0_all = time.time()
     treefiles = [f for f in os.listdir(tree_path) if f.endswith('.dat') and f.startswith('tree_')]
     if tinytest: treefiles=treefiles[0] # for small set to test on, just use trees in one file
+    
+    # Process trees in each file, breaking files into sets if multithreading
     if not multi: 
-        treefilesets = [treefiles]
-    else:
+        processing_meta = process_treefiles(treefiles, tree_path, featnames, meta['lognames'], meta['minmaxnames'], zcut, Mlim, sizelim, downsize_method, phot_ids, min_pctGain, save_path=savefile)
+    else:                   
+        n_threads = os.cpu_count()
+        filesets = np.array_split(treefiles, n_threads) # it wouldnt really heko to split into more sets then there are cpus, right?
+        procs_outdir = savefile.replace('_alltrees.pkl', '_procs_temp/')
+        pool = mp.Pool(processes=n_threads)
+        for i in range(len(filesets)):
+            args = (filesets[i], tree_path, featnames, meta['lognames'], meta['minmaxnames'], zcut, Mlim, sizelim, downsize_method, phot_ids, min_pctGain, procs_outdir, i)
+            pool.apply_async(process_treefiles, args=args)#), callback=response)
+        pool.close()
+        pool.join()
+        all_trees, processing_meta = collect_proc_outputs(procs_outdir) 
 
-    # Add tree dataframes to all_trees dict
-    for treefile in treefiles:
+    # Update meta
+    meta.update(processing_meta) # add keys and values from processing_meta to meta
+    meta['n_threads'] = n_threads if multi else 'NaN'
+    meta['Total time'] = np.round(time.time() - t0_all, 4)
+    meta['featnames'] = featnames if not add_gain else featnames + ['gainPct'] # Add 'gainPct' to feat names if adding that
+        
+    pickle.dump(all_trees, open(savefile, 'wb')) # savefile = name of file containing collected trees from all file sets
+    with open(metafile, 'r+') as f: 
+        listmeta = json.load(f)
+    if list(listmeta[-1].keys())[0] == 'tree meta': # If tree meta already exists (this is a re-do), remove old tree meta
+        listmeta = listmeta[:-1]
+    listmeta.append({'tree meta':meta})  
+    with open(metafile, 'w') as f:
+        json.dump(listmeta, f)
+    f.close()
+    # if multi: os.rmtree(procs_outdir) # remove temp files
+    
+    return 
+
+def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, Mlim, sizelim, downsize_method, phot_ids, min_pctGain, save_path, proc_id=''):
+
+    # Create dicts to store trees and meta results from this file set [note that file set is all tree files if not multithreading]
+    all_trees_set = {}
+    set_meta = {'tot trees': 0, 'tot trees saved': 0, 'trees mass cut': 0, 'trees sat cut': 0, 'trees size cut': 0, 'trees no mergers cut': 0}
+
+    # Set file names for set output
+    if proc_id != '':
+        savefile_set = f'{save_path}/{proc_id}_allobs.pkl' # save_path is ../Data/{dataset}_procs_temp/
+        metafile_set = f'{save_path}/{proc_id}_meta.json'
+    else :
+        savefile_set = save_path # save_path is ../Data/{dataset}_allobs.pkl
+   
+    # Loop through file set
+    proc_name = f"[Proccess {proc_id}]" if proc_id != '' else ''
+    downsize_func = downsize_tree4 if downsize_method == 4 else downsize_tree3 if downsize_method == 3 else downsize_tree1 if downsize_method == 1 else None
+    fcount = 0
+    t0 = time.time()
+    for treefile in fileset: 
                 
         # Load tree sets (each file has many trees, with a tree being a header line followed by rows of nodes)
-        print(f'\tLoading trees from {treefile}', flush=True)
+        print(f'\t{proc_name} Loading trees from {treefile}', flush=True)
         t0_file = time.time()
         pd1 = pd.read_table(f'{tree_path}/{treefile}', skiprows=0, delimiter='\s+', dtype=str) # read ALL COLS in (as strings) 
         raw = pd1.drop(axis=0, index=np.arange(48)) # remove rows 0 to 48, which are one large set of comments
@@ -75,12 +117,12 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, save_path, zcut=('bef
         #print('\t\tChanging dtypes, cutting in z, scaling columns', flush=True)
         halos = change_dtypes(halos, featnames) # only change for features (keep ids as strings)
         halos = make_zcut(halos, zcut)
-        halos, meta = scale(halos, featnames, meta) # REMOVED num_prog FROM COLS GETTING LOG SCALED 
+        halos, set_meta = scale(halos, featnames, logcols, minmaxcols) # REMOVED num_prog FROM COLS GETTING LOG SCALED 
 
         # For each tree, construct dataframe, downsize, save to tree dict with corresponding crossmatch ID as key
         indices = [i for i, x in enumerate(halos['desc_id(3)']) if x == '-1'] # (3/5) THIS WAS NOT '-1' BEFORE! Indices where desc_id is -1 (first line of each tree)
         split_halos = np.split(np.array(halos), np.array(indices[1:])) # list of 2d tree arrays #print(f'\t\tSplitting into {len(split_halos)} individual trees', flush=True)
-        meta['tot trees'] += len(split_halos)
+        set_meta['tot trees'] += len(split_halos)
         tcount = 0
         for i in range(len(split_halos)): 
             haloset = split_halos[i]
@@ -94,51 +136,59 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, save_path, zcut=('bef
             toolong = len(haloset) > float(sizelim) # Christian cut out those over 20000, but Rachel says not to
             # nomergers = len(haloset[haloset[:,4]>1]) == 0
             if (toolong or lowmass or satelite or SFcut): # or nomergers): 
-                if lowmass: meta['trees mass cut'] += 1
-                if satelite: meta['trees sat cut'] += 1
-                if toolong: meta['trees size cut'] += 1
+                if lowmass: set_meta['trees mass cut'] += 1
+                if satelite: set_meta['trees sat cut'] += 1
+                if toolong: set_meta['trees size cut'] += 1
                 continue
             # print(f'\t\t\tProcessing haloset {i} into tree', flush=True)
             tcount += 1
             # Remove "unimportant" subhalos and add newdesc_id with updated descendents
-            if downsize_method != 'None':
-                t0downsize = time.time()
-                dtree = downsize_func(tree, num=i)
-                print(f"\t\tDownsized tree {i} (len {len(tree)}) in {np.round(time.time()-t0downsize, 4)}s", flush=True)
-            else: 
+            if downsize_method == 4: dtree = downsize_func(tree, min_pctGain, num=i)
+            elif downsize_method in [1,3]: dtree = downsize_func(tree, num=i)
+            elif downsize_method == 'None': 
                 dtree = tree
                 dtree['newdesc_id'] = dtree['desc_id(3)']
+            else: raise ValueError('Invalid downsize method')
             dtree = dtree.rename(columns={'desc_id(3)': 'olddesc_id'}) # rename desc_id to olddesc_id
             # Add (rstar_id , tree) to dicts
-            all_trees[rstar_id] = dtree
+            all_trees_set[rstar_id] = dtree
         
-        fcount += 1
-        meta['tot trees saved'] += tcount
+        set_meta['tot trees saved'] += tcount
+        fcount+=1
 
-        print(f"\tDone with {treefile} ({fcount} of {len(treefiles)}). Took {np.round(time.time()-t0_file, 4)}s. Processed {tcount} of {len(split_halos)} trees. {meta['trees mass cut']} mass cut, {meta['trees sat cut']} sats, {meta['trees size cut']} too big, {meta['trees no mergers cut']} no mergers.", flush=True)
-
-        
-
-    meta['total time'] = np.round(time.time() - t0, 4)
-    print(f"\tDone with all files. Took {np.round(time.time() - t0, 4)} s to save {meta['tot trees saved']} total trees")
-    print(f'\tSaving trees in {save_path} and adding meta to {metafile}', flush=True)  
-    with open(save_path, 'wb') as f:
-        pickle.dump(all_trees, f)
-    # with open(osp.expanduser('~/ceph/Data/temptreemetafile.pkl'), 'w') as f:
-    #     json.dump({'tree meta':meta}, f)
-    with open(metafile, 'r+') as f: # with w+ I cant read it but if I write to it with r+ I cant read the new file
-        listmeta = json.load(f)
-    if list(listmeta[-1].keys())[0] == 'tree meta': # If tree meta already exists (this is a re-do), remove old tree meta
-        listmeta = listmeta[:-1]
-    listmeta.append({'tree meta':meta})  
-    with open(metafile, 'w') as f:
-        json.dump(listmeta, f)
-    f.close()
+        print(f"\t{proc_name} Done with {treefile} ({fcount} of {len(fileset)}). Took {np.round(time.time()-t0_file, 4)}s. Processed {tcount} of {len(split_halos)} trees. {meta['trees mass cut']} mass cut, {meta['trees sat cut']} sats, {meta['trees size cut']} too big, {meta['trees no mergers cut']} no mergers.", flush=True)
     
-    return 
+    set_meta['total time'] = np.round(time.time() - t0, 4)
+    print(f"\t{proc_name} Done with all files. Took {np.round(time.time() - t0, 4)} s to save {set_meta['tot trees saved']} total trees")
+    m =  f'and saving processing meta to {metafile_set}' if proc_id != '' else ''
+    print(f'\t{proc_name} Saving trees in {savefile_set} {m}', flush=True) 
+    pickle.dump(all_trees_set, open(savefile_set, 'wb'))
+    if proc_id != '' :  
+        pickle.dump(set_meta, open(metafile_set, 'wb'))
+    else:
+        return set_meta
+
+def collect_proc_outputs(procs_outdir):
+
+    # Append all disctionaries of (rstar_id, tree) pairs to all_trees
+    all_trees = {}
+    treeset_files = [file for file in os.listdir(procs_outdir) if file.endswith('allobs.pkl')]
+    for f in treeset_files:
+        all_trees_set = pickle.load(open(f, 'rb'))
+        all_trees.update(all_trees_set)
+
+    # Add up total counts and store in meta 
+    processing_meta = {'tot trees': 0, 'tot trees saved': 0, 'trees mass cut': 0, 'trees sat cut': 0, 'trees size cut': 0, 'trees no mergers cut': 0}
+    treeset_files = [file for file in os.listdir(procs_outdir) if file.endswith('meta.pkl')]
+    for f in treeset_files:
+        meta_set = pickle.load(open(f, 'rb'))
+        for key in processing_meta.keys():
+            processing_meta[key] += meta_set[key]
+
+    return all_trees, processing_meta
 
 # Make dictionary of (subhalo, phot) for all central subhalos
-def prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile, save_path, reslim=100):
+def prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile, savefile, reslim=100):
     # Should I store mstar and res as well? 
     #   Would it make later access easier?
     #   Won't help for looking at other targs, and would still need to re-map to trees, since dont want graphs to include things other)
@@ -181,8 +231,8 @@ def prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile, save_path,
         meta['tot galaxies saved'] += 1
 
     # Save to pickle
-    print(f'\tSaving phot in {save_path} and meta in {metafile}', flush=True)     
-    with open(save_path, 'wb') as f:
+    print(f'\tSaving phot in {savefile} and meta in {metafile}', flush=True)     
+    with open(savefile, 'wb') as f:
         pickle.dump(all_phot, f)
     #listmeta = [{'obs meta':meta}]
     # with open(metafile, 'w') as f:
@@ -275,8 +325,14 @@ def make_edges(tree):
             desc_pos = np.where(tree['id(1)']==desc_id)[0][0] 
             progs.append(i)
             descs.append(desc_pos) 
+    edge_index = torch.tensor([progs,descs], dtype=torch.long) 
+    edges = np.full(len(progs),np.NaN)
+    edge_attr = torch.tensor(edges, dtype=torch.float)
 
-    return progs, descs
+    return edge_index, edge_attr
+
+def response(result):
+    results.append(result)
 
  # Collect other targets for the same galaxies as in the photometry
 def collect_othertargs(obscat_path, alltrees, volname, save_path, reslim=100):
@@ -441,8 +497,8 @@ def make_zcut(halos, zcut):
     return halos
 
 # Scale appropriate cols
-def scale(halos, featnames, meta):
-    
+def scale(halos, featnames, lognames=['Mvir(10)', 'Mvir_all', 'M200b', 'M200c', 'M2500c', 'M_pe_Behroozi', 'M_pe_Diemer'], minmaxnames=['Jx(23)', 'Jy(24)', 'Jz(25)']):
+
     # Define scaling funcs
     def logt(x):
         return np.log10(x+1)
@@ -450,24 +506,19 @@ def scale(halos, featnames, meta):
         return x/max(x)
 
     # Scale some features with logt # WHY WAS CHRISITIAN LOG SCALING NUM_PROG??
-    lognames = ['Mvir(10)', 'Mvir_all', 'M200b', 'M200c', 'M2500c', 'M_pe_Behroozi', 'M_pe_Diemer'] # [10, 38, 39, 40, 4, 42, 57, 58] # cols to take logt of (take log10 of others later??)
-    # lognames = ['num_prog(4)', 'Mvir(10)', 'Mvir_all', 'M200b', 'M200c', 'M2500c', 'M_pe_Behroozi', 'M_pe_Diemer'] # [10, 38, 39, 40, 4, 42, 57, 58] # cols to take logt of (take log10 of others later??)
     tolog = [name for name in featnames if name in lognames]
     for name in tolog:
         halos[name] = logt(halos[name])
 
     # Scale some features with minmax 
-    minmaxnames = ['Jx(23)', 'Jy(24)', 'Jz(25)'] # [23, 24, 25] # cols to maxscale ("simple min/max for 1e13 scaling down"???)
     tominmax = [name for name in featnames if name in minmaxnames]
     for name in tominmax:
         halos[name] = maxscale(halos[name])
-    
-    meta['logcols'] = lognames
-    meta['minmaxcols'] = minmaxnames
-    
-    return halos, meta 
 
-def downsize_tree1(tree): # TAKE ONLY IMPORTANT HALOS (HALOS WITH NO PROGS OR MUTILE progs, AND HALOS WITH MERGED HALOS AS THIER DESCENDENT) THIS IS s=tree[np.logical_or(tree[:,3] == -1,tree[:,4]!=1)] # 
+    return halos
+
+
+def downsize_tree1(tree, add_gain=False): # TAKE ONLY IMPORTANT HALOS (HALOS WITH NO PROGS OR MUTILE progs, AND HALOS WITH MERGED HALOS AS THIER DESCENDENT) THIS IS s=tree[np.logical_or(tree[:,3] == -1,tree[:,4]!=1)] # 
     '''
     Halo is important if:
         - Its an root halo (n_progs = 0)
@@ -498,7 +549,7 @@ def downsize_tree1(tree): # TAKE ONLY IMPORTANT HALOS (HALOS WITH NO PROGS OR MU
     
     return tree
 
-def downsize_tree3new(tree, num, debug=False):
+def downsize_tree3new(tree, num, add_gain=False, debug=False):
     '''
     Same as below, but attempt to speed up by not carrying through all the cols
      - Just keep ids of halos, not full rows
@@ -619,7 +670,7 @@ def downsize_tree3new(tree, num, debug=False):
 
     return tree_out
 
-def downsize_tree3(tree, num, debug=False):
+def downsize_tree3(tree, num, add_gain=False, debug=False):
     '''
     Attempt to replicate Christian's method
     WTF why is this so much faster its like even way faster than Christians??? Cuts the same num halos as Christians (both way more than mine)
@@ -666,9 +717,9 @@ def downsize_tree3(tree, num, debug=False):
         halmix.append(mergers[q]); hrc +=1 
         if debug: print(f"  Adding it to halmix [halmix row {hrc}]") 
         k=1
-        descid = atree[:,descidcol][np.where(mid==atree[:,idcol])][0] # look at this halo's descendent 
-        while descid not in mergers[:,idcol] and descid!='-1': # if this halos desc is not a merger or final, find the next halo who's desc is merger or final and assign it to be this halos be this halos new desc
-            proid = atree[:,idcol][np.where(descid==atree[:,idcol])][0] # get the id of the prog of this halo's descendent (want to keep the progs of mergers - could this get moved outside while loop and just get it if this halo's desc is a merger?)   # added [0] 
+        descid = atree[:,descidcol][np.where(mid==atree[:,idcol])][0] # look at this halo's (descdendent's) descendent 
+        while descid not in mergers[:,idcol] and descid!='-1': # if this halos (descdendent's) desc is not a merger or final, find the next halo who's desc is merger or final and assign it to be this halos be this halos new desc
+            proid = atree[:,idcol][np.where(descid==atree[:,idcol])][0] # WAIT ISINT THIS THE SAME AS PROID = DESCID?? get the id of the prog of this halo's descendent (want to keep the progs of mergers - could this get moved outside while loop and just get it if this halo's desc is a merger?)   # added [0] 
             descid = atree[:,descidcol][np.where(descid==atree[:,idcol])][0] # look at this halo's descendent's descendent   # added [0] # desc id of halos desc  ##new descendant id where current descendant id = halo id
             k += 1
         if k>1 and proid != finalid: # if original desc of this merger was not a merger but its new desc is (as opposed to new desc being final (this is same as descid != -1, right?))
@@ -678,7 +729,7 @@ def downsize_tree3(tree, num, debug=False):
                 print(f"  Its original desc is not a merger or final, and this new desc is merger, not final")
                 print(f"     Adding id of its new desc ('proid' {proid}) to des [des row {drc}]") # Add halo's new desc id at corresponding des index
                 print(f"     Adding its new desc (halo at 'proid') to halmix [halmix row {hrc}]") # Add new descendent to halmix
-        if descid!='-1': # if desc of [this merger]/[this mergers new desc] is not final (is a merger)
+        if descid!='-1': # if desc of this mergers new desc is not final (is a merger)
             des.append(descid); drc +=1 # Add [id of desc]/[id of new desc's desc] to des at [idx correponding to this merger]/[idx corresponding to new desc] # removed [0]
             if debug: print(f"  Adding {'new' if k>1 else 'original'} descid {descid} to des [des row {drc}]") 
         else: # descid==-1, e.g. either didnt enter while loop or entered and found final
@@ -752,109 +803,136 @@ def downsize_tree3(tree, num, debug=False):
 
     return tree_out
 
-
-
-def downsize_tree4(tree, num, debug=False):
+def downsize_tree3_test(tree, num, add_gain=False, debug=False):
     '''
-    Same as downsize_tree3, except also retaining nodes if there is significant mass change
+    Try re-writting downsize_tree3 to be more readable.
+    This *should* produce exactly the same output as downsize_tree3
+    (unless - was christian including the pre-final halo?)
     '''
-
-    #print(f"\t\t\t   Downsizing ({len(tree)} -->", end='', flush=True)
-
     nprogcol = tree.columns.get_loc('num_prog(4)')
-    descidcol = tree.columns.get_loc('desc_id(3)')
+    didcol = tree.columns.get_loc('desc_id(3)')
     idcol = tree.columns.get_loc('id(1)')
-    masscol = tree.columns.get_loc('Mvir(10)')
-
-    halmix = []
 
     atree= np.array(tree) # halwgal[n]
-    roots = atree[atree[:,nprogcol]==0] # yup num_prog still at 4 
+    roots = atree[atree[:,nprogcol]==0] 
+    rids = roots[:,idcol]
     mergers = atree[atree[:,nprogcol]>1]
-    final = atree[atree[:,descidcol]=='-1']
-    des = []; #pro = []; discarded = []; premerger_id = []
-    finalid = final[0][idcol] # [0] because atree[row] will give list inside a list
-        
+    mids = mergers[:,idcol]
+    final = atree[atree[:,didcol]=='-1'][0] # [0] because atree[row] will give list inside a list
+    finalid = final[idcol] 
+
+    out_halos = []
+    newdescs = []
+
     hrc = -1; drc = -1
     if debug: print(f"\n")
     if finalid not in mergers[:,idcol]: # IF FIRST HALO (FINAL HALO) IS NOT A MERGER (ONLY 1 DESC) IT ALSO WONT BE A ROOT SO IT WILL NEVER GET ADDED... 
-        halmix.append(final[0]); hrc += 1
-        des.append(final[0][descidcol]); drc += 1
-        if debug:
-            print(f"Final halo {finalid} is not a merger, so adding it here")
-            print(f"  Adding it to halmix [halmix row {hrc}]") 
-            print(f"  Adding its desc id {final[0][descidcol]} to des [des row {drc}]")
+        out_halos.append(list(final)); hrc += 1
+        newdescs.append(final[didcol]); drc += 1
+        if debug: print(f"Final halo {finalid} is not a merger, so adding it here.\n   Adding it to halmix [halmix row {hrc}]\n   Adding its desc id {final[didcol]} to des [des row {drc}]")
     if debug: print(f"Looping through roots and mergers")
-    for q, mid in enumerate(mergers[:,idcol]): # for each halo that is a merger
-        if debug: print(f"Halo {mid} is merger {q} (descid {atree[:,descidcol][np.where(mid==atree[:,idcol])][0]})")
-        halmix.append(mergers[q]); hrc +=1 
-        if debug: print(f"  Adding it to halmix [halmix row {hrc}]") 
-        k=1
-        descid = atree[:,descidcol][np.where(mid==atree[:,idcol])][0] # this halo's descendent id
-        mass = atree[:,masscol][np.where(mid==atree[:,idcol])][0] # this halo's mass
-        while descid not in mergers[:,idcol] and descid!='-1' and deltaM < min_deltaMm: # if this halos desc is not a merger, final, or big mass change, find the next halo who's desc is merger, final, or big mass change and assign it to be this halos be this halos new desc
-            proid = atree[:,idcol][np.where(descid==atree[:,idcol])][0] # get the id of the prog of this halo's descendent (want to keep the progs of mergers - could this get moved outside while loop and just get it if this halo's desc is a merger?)   # added [0] 
-            descid = atree[:,descidcol][np.where(descid==atree[:,idcol])][0] # look at this halo's descendent's descendent   # added [0] # desc id of halos desc  ##new descendant id where current descendant id = halo id
-            deltaM = mass - atree[:,masscol][np.where(descid==atree[:,idcol])][0] 
-            k += 1
-        if k>1 and proid != finalid: # if original desc of this merger was not a merger but its new desc is (as opposed to new desc being final (this is same as descid != -1, right?))
-            des.append(proid); drc += 1
-            halmix.append(atree[np.where(proid==atree[:,idcol])][0]); hrc +=1
-            if debug:
-                print(f"  Its original desc is not a merger or final, and this new desc is merger, not final")
-                print(f"     Adding id of its new desc ('proid' {proid}) to des [des row {drc}]") # Add halo's new desc id at corresponding des index
-                print(f"     Adding its new desc (halo at 'proid') to halmix [halmix row {hrc}]") # Add new descendent to halmix
-        if descid!='-1': # if desc of [this merger]/[this mergers new desc] is not final (is a merger)
-            des.append(descid); drc +=1 # Add [id of desc]/[id of new desc's desc] to des at [idx correponding to this merger]/[idx corresponding to new desc] # removed [0]
-            if debug: print(f"  Adding {'new' if k>1 else 'original'} descid {descid} to des [des row {drc}]") 
-        else: # descid==-1, e.g. either didnt enter while loop or entered and found final
-            if k == 1:
-                des.append(atree[:,descidcol][np.where(mid==atree[:,idcol])][0]); drc += 1 # ADD ORIGINAL DESC??? THAT ONLY WORKS IF DIDNT ENTER WHILE (E.G. PROG OF FINAL IS MERGER, AND WE ARE ON THAT MERGER)
-                if debug: print(f"  Adding original desc id {atree[:,descidcol][np.where(mid==atree[:,idcol])][0]} to des [des row {drc}]")
-            else: 
-                des.append(finalid); drc += 1 # Add id of new desc's desc (final) to des at idx corresponding to new desc
-                if debug: print(f"  Adding new descid (final halo {proid} to des [des row {drc}]")
-                if proid != finalid: print(f"Error: entered loop and found final, but proid {proid} != finalid {finalid}"); a=b
+
+    for q, mid in enumerate(mids):
+
+        # Add the merger to out_halos
+        if q>0:
+            if mid in np.array(out_halos)[:,idcol]: raise ValueError(f"About to add merger {q} (halo {mid}), but id {mid} is already in out_halos")
+        unique_ids, counts = np.unique(np.array(out_halos)[:,idcol], return_counts=True)
+        if np.any(counts > 1): raise ValueError(f"After adding merger {q} (id {mid}), tree_out has duplicate ids")
+        if debug: print(f"Halo {mid} is merger {q}. Adding it to halmix [halmix row {hrc}]") 
+        out_halos.append(list(mergers[q])); hrc +=1 # add this merger halo to out_halos
+
+        # Find merger's new descendent and add it to newdescs
+        orig_descid = atree[:,didcol][np.where(mid==atree[:,idcol])][0] # look at thiss halo's descendent
+        descid = orig_descid
+        descdescid = atree[atree[:,idcol]==descid][0][didcol] #if not desc_is_final else 'None'
+        desc_is_final = descdescid =='-1' # check if candidate is a final
+        desc_is_merger = descid in mids # Check if candidate is a merger
+        desc_is_premerger = descdescid in mids # Check if candidate is a premerger (its desc is a merger)
+        while not (desc_is_final or desc_is_merger or desc_is_premerger): 
+            descid = atree[:,didcol][np.where(descid==atree[:,idcol])][0] # step candidate descendent
+            descdescid = atree[atree[:,idcol]==descid][0][didcol] #if not desc_is_final else 'None'
+            desc_is_final = descdescid =='-1' # check if candidate is a final
+            desc_is_merger = descid in mids # Check if candidate is a merger
+            desc_is_premerger = descdescid in mids # Check if candidate is a premerger (its desc is a merger)
+        if debug: 
+            print(f"  Orig desc {orig_descid} is {'final' if descid==orig_descid and desc_is_final else 'merger' if desc_is_merger else 'premerger' if descid==orig_descid and desc_is_premerger else 'not keepable' if descid!=orig_descid else 'error'} {'so adding it to newdescs' if descid==orig_descid else ''}") # (f"  Adding {'new' if descid!=orig_descid else 'original'} descid ({descid}) to newdescs [row {drc}]")
+            if descid!=orig_descid: print(f"  Found new desc {descid} which is {'final' if desc_is_final else 'merger' if desc_is_merger else 'premerger' if desc_is_premerger else 'error'}, adding it to newdescs")
+        if descid=='-1' and '-1' in newdescs: raise ValueError(f"Halo {mid} has descid {descid}, but there is already a final halo added")
+        newdescs.append(descid); drc+=1
+        # When add mass gain check, need to keep going here
+        # Could end up with desc that is not a merger and not the final, meaning that while *it* would get added to out_halos,
+        # if there is a chain below it before the next merger those wouldnt get checked for being ok due to mass, 
+        # and the premerger before the merger wouldnt get added either
+        # if mass_gain: # if this desc was kep becasue it had a large mass gain, not becasue its a premerger or final 
+
+        # Add descendent to out_halos if it is a premerger and not also merger or final
+        if desc_is_premerger and not desc_is_merger: # and descid!=orig_descid: 
+            out_halos.append(list(atree[np.where(descid==atree[:,idcol])][0])); hrc +=1 # add this descendent to out_halos
+            if descid=='-1' and '-1' in newdescs: raise ValueError(f"Halo {mid} has descid {descid}, but there is already a final halo added")
+            newdescs.append(descdescid); drc += 1 # add this descendent's descendent to newdescs
+            if debug: print(f"  The desc is a premerger (and not merger), so adding it to halmix [row {hrc}] and adding its own desc to newdescs [row {drc}]")
+  
+        ###
+        # Why were all the other steps needed???
+        ###
         
-        if hrc != drc: print(f"Error: hrc {hrc} != drc {drc}"); a=b
-        if len(halmix[-1]) != len(list(tree.columns)):
-            print(f"\n[haloset {num}] Error at halmix row {hrc} (after proccessing merger {q}) has length {len(halmix[-1])} not n feats {len(list(tree.columns))} \n\thalmix[-1] {halmix[-1]}"); a=b
+        if hrc != drc: raise ValueError(f"Error: hrc {hrc} != drc {drc}")
+        if len(out_halos[-1]) != len(list(tree.columns)):
+            raise ValueError(f"\n[haloset {num}] Error at halmix row {hrc} (after proccessing merger {q}) has length {len(out_halos[-1])} not n feats {len(list(tree.columns))} \n\thalmix[-1] {out_halos[-1]}")
 
     c = 0     
-    for r in roots: # for each halo that is a root
-        #print(f"Halo {r[idcol]} is root {c} (descid {atree[:,descidcol][np.where(r[idcol]==atree[:,idcol])][0]})")
-        halmix.append(r); hrc +=1 
-        #print(f"  Adding it to halmix [halmix row {hrc}]")
-        descid=atree[:,descidcol][np.where(r[idcol]==atree[:,idcol])][0] 
-        mass=atree[:,masscol][np.where(r[idcol]==atree[:,idcol])][0]
-        k=1
-        while descid not in mergers[:,idcol] and descid!='-1' and deltaM < min_deltaM: # could remove descid!=-1 right? root should never go directly to final
-            proid = atree[:,idcol][np.where(descid==atree[:,idcol])][0] 
-            descid = atree[:,descidcol][np.where(descid==atree[:,idcol])][0]
-            deltaM = mass - atree[:,masscol][np.where(descid==atree[:,idcol])][0] 
-            k+=1
-        if k>1 and proid!=finalid: # if it entered the above while loop (desc of this merger is not a merger?) and progenitor is not the final halo (?)
-            halmix.append(atree[np.where(proid==atree[:,idcol])][0]); hrc +=1 
-            des.append(proid); drc += 1
-            if debug:
-                print(f"  Its original desc is not a merger or final, and new proid is also not final")
-                print(f"     Adding halo at new 'proid' to halmix [halmix row {hrc}]")
-                print(f"     Adding new 'proid' {proid} to des [des row {drc}]")
-        if descid!='-1':
-            des.append(descid); drc +=1 
-            if debug: print(f"  Adding {'new' if k>1 else 'original'} {descid} to des [des row {drc}]")
-        else: # descid==-1, e.g. didn't enter loop (dont need to worry about finding final as next desc of a root)
-            des.append(atree[:,descidcol][np.where(r[idcol]==atree[:,idcol])][0]); drc += 1
-            if debug: print(f"  Adding original desc id {atree[:,descidcol][np.where(mid==atree[:,idcol])][0]} to des [des row {drc}]") 
+    for q, rid in enumerate(rids):
 
-        if hrc != drc: print(f"Error: hrc {hrc} != drc {drc}"); a=b
-        if len(halmix[-1]) != len(list(tree.columns)):
-            print(f"\n[haloset {num}] Error: row at at halmic row {hrc} (after proccessing root {c}) has length {len(halmix[-1])} not n feats {len(list(tree.columns))} \n\thalmix[-1] {halmix[-1]}"); a=b
+        # Add the root to out_halos
+        if rid in np.array(out_halos)[:,idcol]: raise ValueError(f"About to add root {q} (halo {rid}), but id {rid} is already in out_halos")
+        unique_ids, counts = np.unique(np.array(out_halos)[:,idcol], return_counts=True)
+        if np.any(counts > 1): raise ValueError(f"After adding merger {q} (id {mid}), tree_out has duplicate ids")
+        if debug: print(f"Halo {rid} is root {q}. Adding it to halmix [halmix row {hrc}]") 
+        out_halos.append(list(roots[q])); hrc +=1 
+
+        # Find root's new descendent and add it to newdescs
+        orig_descid = atree[:,didcol][np.where(rid==atree[:,idcol])][0] # look at thiss halo's descendent
+        descid = orig_descid
+        desc_is_final = descid =='-1' # check if candidate is a final
+        desc_is_merger = descid in mids # Check if candidate is a merger                        
+        descdescid = atree[atree[:,idcol]==descid][0][didcol] if not desc_is_final else 'None' # if desc is final, desc's desc is None
+        desc_is_premerger = descdescid in mids # Check if candidate is a premerger (its desc is a merger)
+        while not (desc_is_final or desc_is_merger or desc_is_premerger):
+            descid = atree[:,didcol][np.where(descid==atree[:,idcol])][0] # step candidate descendent
+            desc_is_final = descid =='-1' # check if candidate is a final
+            desc_is_merger = descid in mids # Check if candidate is a merger
+            descdescid = atree[atree[:,idcol]==descid][0][didcol] if not desc_is_final else 'None'
+            desc_is_premerger = descdescid in mids # Check if candidate is a premerger (its desc is a merger)
+        if debug: 
+            print(f"  Orig desc {orig_descid} is {'final' if descid==orig_descid and desc_is_final else 'merger' if desc_is_merger else 'premerger' if descid==orig_descid and desc_is_premerger else 'not keepable' if descid!=orig_descid else 'error'}  {'so adding it to newdescs' if descid==orig_descid else ''}") # (f"  Adding {'new' if descid!=orig_descid else 'original'} descid ({descid}) to newdescs [row {drc}]")
+            if descid!=orig_descid: print(f"  Found new desc {descid} which is {'final' if desc_is_final else 'merger' if desc_is_merger else 'premerger' if desc_is_premerger else 'error'}, adding it to newdescs")
+        if descid=='-1' and '-1' in newdescs: raise ValueError(f"Halo {rid} has descid {descid}, but there is already a final halo added")
+        newdescs.append(descid); drc+=1
+        # When add mass gain check, need to keep going here
+        # Could end up with desc that is not a merger and not the final, meaning that while *it* would get added to out_halos,
+        # if there is a chain below it before the next merger those wouldnt get checked for being ok due to mass, 
+        # and the premerger before the merger wouldnt get added either
+        # if mass_gain: # if this desc was kep becasue it had a large mass gain, not becasue its a premerger or final 
+
+        # Add descendent to out_halos if it is a premerger and not also merger or final
+        if desc_is_premerger and not desc_is_merger: # and descid!=orig_descid: 
+            out_halos.append(list(atree[np.where(descid==atree[:,idcol])][0])); hrc +=1 # add this descendent to out_halos
+            newdescs.append(descdescid); drc += 1 # add this descendent's descendent to newdescs
+            if debug: print(f"  The desc is a premerger (and not merger), so adding it to halmix [row {hrc}] and adding its own desc to newdescs [row {drc}]")
+  
+        ###
+        # Why were all the other steps needed???
+        ###
+
+        if hrc != drc: raise ValueError(f"Error: hrc {hrc} != drc {drc}")
+        if len(out_halos[-1]) != len(list(tree.columns)):
+            raise ValueError(f"\n[haloset {num}] Error: row at at halmic row {hrc} (after proccessing root {c}) has length {len(out_halos[-1])} not n feats {len(list(tree.columns))} \n\thalmix[-1] {out_halos[-1]}")
 
         c += 1
-    
-    tree_out = pd.DataFrame(halmix, columns=tree.columns)
-    tree_out['newdesc_id'] = des
+
+    tree_out = pd.DataFrame(out_halos, columns=tree.columns)
+    tree_out['newdesc_id'] = newdescs
 
     for i in range(len(tree_out)):
         if not (tree_out.iloc[i]['newdesc_id'] in list(tree_out['id(1)']) or tree_out.iloc[i]['newdesc_id'] == '-1'): # this halos original descendent was cut without updateing this halos descendent 
@@ -868,17 +946,207 @@ def downsize_tree4(tree, num, debug=False):
         np.array(tree_out, dtype=float)
     except: 
         print(f"[haloset {num}] Cant set tree_out to array")
-        for i in range(len(halmix)):
+        for i in range(len(out_halos)):
             try: np.array(tree_out.iloc[i], dtype=float)
             except: 
                 print(f"[haloset {num}] Error at row {i}")
-                print(f"halmix[i] \n{halmix[i]} \nhalmix[i+1] \n{halmix[i+1]}")
-                print(f"tree_out.iloc[i] \n{list(tree_out.iloc[i])} \ntree_out.iloc[i+1] \n{list(tree_out.iloc[i+1])}")
-                a=b
+                print(f"halmix[i] \n{out_halos[i]} \nhalmix[i+1] \n{out_halos[i+1]}")
+                print(f"tree_out.iloc[i] \n{list(tree_out.iloc[i])} \ntree_out.iloc[i+1] \n{list(tree_out.iloc[i+1])}"); a=b
+
+
+    unique_ids, counts = np.unique(tree_out['id(1)'], return_counts=True) # np.unique(tree_out['id(1)'], return_counts=True)
+    if np.any(counts > 1):
+        raise ValueError(f"Tree_out has duplicate ids")
+
 
     #print(f"{len(halmix)})", flush=True) 
 
     return tree_out
+
+
+def downsize_tree4(tree, num, add_gain=False, min_gainPct = 10, debug=False):
+    '''
+    Same as downsize_tree3 (really copied from downsize_tree3_test), except also retaining nodes if there is significant mass change
+     - Add check for high mass gain to while loop
+     - But also, don't exit while loop if desc is only high mass gain. 
+       Still add it to newdescs at the index corresponding to the mid
+       And then, like when premerger, still need to add it to out_halos and its own desc to newdecs
+       But, 
+    '''
+
+    nprogcol = tree.columns.get_loc('num_prog(4)')
+    didcol = tree.columns.get_loc('desc_id(3)')
+    idcol = tree.columns.get_loc('id(1)')
+    masscol = tree.columns.get_loc('Mvir(10)')
+
+    atree= np.array(tree) # halwgal[n]
+    roots = atree[atree[:,nprogcol]==0] 
+    rids = roots[:,idcol]
+    mergers = atree[atree[:,nprogcol]>1]
+    mids = mergers[:,idcol]
+    final = atree[atree[:,didcol]=='-1'][0] # [0] because atree[row] will give list inside a list
+    finalid = final[idcol] 
+
+    out_halos = []
+    newdescs = []
+
+    hrc = -1; drc = -1
+    if debug: print(f"\n")
+    if finalid not in mergers[:,idcol]: # IF FIRST HALO (FINAL HALO) IS NOT A MERGER (ONLY 1 DESC) IT ALSO WONT BE A ROOT SO IT WILL NEVER GET ADDED... 
+        out_halos.append(list(final)); hrc += 1
+        newdescs.append(final[didcol]); drc += 1
+        if debug: print(f"Final halo {finalid} is not a merger, so adding it here.\n   Adding it to halmix [halmix row {hrc}]\n   Adding its desc id {final[didcol]} to des [des row {drc}]")
+    if debug: print(f"Looping through roots and mergers")
+
+    for q, mid in enumerate(mids):
+
+        if debug: print(f"Starting from halo of interest merger {q} (id {mid})")
+        hid = mid # id of halo of interest
+        end_of_chain = False
+        while not end_of_chain:
+
+            # Find check halo's original desc - if good, it will be either "end_of_chain" (merger, premerger, or final) or high mass gain
+            halo_mass = atree[:,masscol][np.where(hid==atree[:,idcol])][0] # this halo's mass
+            orig_descid = atree[:,didcol][np.where(hid==atree[:,idcol])][0] # look at thiss halo's descendent
+            descid = orig_descid
+            descdescid = atree[atree[:,idcol]==descid][0][didcol] #if not desc_is_final else 'None'
+            desc_is_final = descdescid =='-1' # check if candidate is a final
+            desc_is_merger = descid in mids # Check if candidate is a merger
+            desc_is_premerger = descdescid in mids # Check if candidate is a premerger (its desc is a merger)
+            gain_pct = 10**(halo_mass - atree[:,masscol][np.where(descid==atree[:,idcol])][0]) 
+            desc_is_highgain = gain_pct > min_gainPct
+            if debug: 
+                if hid!=mid: print(f"New halo of interest {hid}")
+                print(f"  Orig desc {orig_descid} is {'final' if descid==orig_descid and desc_is_final else 'merger' if desc_is_merger else 'premerger' if descid==orig_descid and desc_is_premerger else 'high mass change' if desc_is_highgain else 'not keepable'}")
+            
+            # Find new desc - it will be either "end_of_chain" (merger, premerger, or final) or high mass gain
+            while not (desc_is_final or desc_is_merger or desc_is_premerger or desc_is_highgain): 
+                descid = atree[:,didcol][np.where(descid==atree[:,idcol])][0] # step candidate descendent
+                descdescid = atree[atree[:,idcol]==descid][0][didcol] #if not desc_is_final else 'None'
+                desc_is_final = descdescid =='-1' # check if candidate is a final
+                desc_is_merger = descid in mids # Check if candidate is a merger
+                desc_is_premerger = descdescid in mids # Check if candidate is a premerger (its desc is a merger)
+                gain_pct = 10**(halo_mass - atree[:,masscol][np.where(descid==atree[:,idcol])][0]) 
+                desc_is_highgain = gain_pct > min_gainPct
+
+            # Add the merger to out_halos and its desc to newdescs
+            if debug: 
+                print(f"  Adding {'original merger' if hid==mid else 'halo of interest'} {hid} to halmix [halmix row {hrc}]") 
+                if descid!=orig_descid: print(f"  Found new desc {descid} which is {'final' if desc_is_final else 'merger' if desc_is_merger else 'premerger' if desc_is_premerger else 'high mass change' if desc_is_highgain else 'error'}, adding it to newdescs [row {drc}]")
+                else: print(f"  Adding original desc {descid} to newdescs [row {drc}]")
+            out_halos.append(list(atree[np.where(hid==atree[:,idcol])][0])); hrc +=1 # add this halo of interest to out_halos
+            newdescs.append(descid); drc+=1 # if descid=='-1' and '-1' in newdescs: raise ValueError(f"Halo {mid} has descid {descid}, but there is already a final halo added")
+            unique_ids, counts = np.unique(np.array(out_halos)[:,idcol], return_counts=True)
+            if np.any(counts > 1): raise ValueError(f"After adding merger {q} (id {mid}), tree_out has duplicate ids: {unique_ids[counts>1]}")
+
+            # Add descendent to out_halos if it is a premerger and not also merger or final
+            if desc_is_premerger and not (desc_is_merger or desc_is_final): 
+                out_halos.append(list(atree[np.where(descid==atree[:,idcol])][0])); hrc +=1 # add this descendent to out_halos # if descid=='-1' and '-1' in newdescs: raise ValueError(f"Halo {mid} has descid {descid}, but there is already a final halo added")
+                newdescs.append(descdescid); drc += 1 # add this descendent's descendent to newdescs
+                if debug: print(f"  Since the {'orig' if descid==orig_descid else 'new'} desc is a premerger (and not merger), adding it to halmix [row {hrc}] and adding its own desc to newdescs [row {drc}]")
+
+            # New desc is end_of_chain if it is good but NOT just for high mass gain, if not, set hid to descid and repeat
+            end_of_chain = desc_is_final or desc_is_merger or desc_is_premerger 
+            if not end_of_chain and desc_is_highgain: hid = descid
+
+
+        # Checks
+        if hrc != drc: raise ValueError(f"Error: hrc {hrc} != drc {drc}")
+        if len(out_halos[-1]) != len(list(tree.columns)):
+            raise ValueError(f"\n[haloset {num}] Error at out_halos row {hrc} (after proccessing merger {q}) has length {len(out_halos[-1])} not n feats {len(list(tree.columns))} \n\thalmix[-1] {out_halos[-1]}")
+
+    c = 0     
+    for q, rid in enumerate(rids):
+
+        if debug: print(f"Starting from halo of interest root {q} (id {rid})")
+        hid = rid # id of halo of interest
+        end_of_chain = False
+        while not end_of_chain:
+
+            # Find check halo's original desc - if good, it will be either "end_of_chain" (merger, premerger, or final) or high mass gain
+            halo_mass = atree[:,masscol][np.where(hid==atree[:,idcol])][0] # this halo's mass
+            orig_descid = atree[:,didcol][np.where(hid==atree[:,idcol])][0] # look at thiss halo's descendent
+            descid = orig_descid
+            descdescid = atree[atree[:,idcol]==descid][0][didcol] #if not desc_is_final else 'None'
+            desc_is_final = descdescid =='-1' # check if candidate is a final
+            desc_is_merger = descid in mids # Check if candidate is a merger
+            desc_is_premerger = descdescid in mids # Check if candidate is a premerger (its desc is a merger)
+            gain_pct = 10**(halo_mass - atree[:,masscol][np.where(descid==atree[:,idcol])][0]) 
+            desc_is_highgain = gain_pct > min_gainPct
+            if debug: 
+                if hid!=mid: print(f"New halo of interest {hid}")
+                print(f"  Orig desc {orig_descid} is {'final' if descid==orig_descid and desc_is_final else 'merger' if desc_is_merger else 'premerger' if descid==orig_descid and desc_is_premerger else 'high mass change' if desc_is_highgain else 'not keepable'}")
+            
+            # Find new desc - it will be either "end_of_chain" (merger, premerger, or final) or high mass gain
+            while not (desc_is_final or desc_is_merger or desc_is_premerger or desc_is_highgain): 
+                descid = atree[:,didcol][np.where(descid==atree[:,idcol])][0] # step candidate descendent
+                descdescid = atree[atree[:,idcol]==descid][0][didcol] #if not desc_is_final else 'None'
+                desc_is_final = descdescid =='-1' # check if candidate is a final
+                desc_is_merger = descid in mids # Check if candidate is a merger
+                desc_is_premerger = descdescid in mids # Check if candidate is a premerger (its desc is a merger)
+                gain_pct = 10**(halo_mass - atree[:,masscol][np.where(descid==atree[:,idcol])][0]) 
+                desc_is_highgain = gain_pct > min_gainPct
+            if debug and descid!=orig_descid: print(f"  Found new desc {descid} which is {'final' if desc_is_final else 'merger' if desc_is_merger else 'premerger' if desc_is_premerger else 'high mass change' if desc_is_highgain else 'error'}, adding it to newdescs")
+
+            # Add the root to out_halos and its desc to newdescs
+            if debug: 
+                print(f"  Adding {'original merger' if hid==rid else 'halo of interest'} {hid} to halmix [halmix row {hrc}]") 
+                if descid!=orig_descid: print(f"  Found new desc {descid} which is {'final' if desc_is_final else 'merger' if desc_is_merger else 'premerger' if desc_is_premerger else 'high mass change' if desc_is_highgain else 'error'}, adding it to newdescs [row {drc}]")
+                else: print(f"  Adding original desc {descid} to newdescs [row {drc}]")          
+            out_halos.append(list(atree[np.where(hid==atree[:,idcol])][0])); hrc +=1 # add this halo of interest to out_halos
+            newdescs.append(descid); drc+=1 # if descid=='-1' and '-1' in newdescs: raise ValueError(f"Halo {mid} has descid {descid}, but there is already a final halo added")
+            unique_ids, counts = np.unique(np.array(out_halos)[:,idcol], return_counts=True)
+            if np.any(counts > 1): raise ValueError(f"After adding root {q} (id {rid}), tree_out has duplicate ids: {unique_ids[counts>1]}")
+
+            # Add descendent to out_halos if it is a premerger and not also merger or final
+            if desc_is_premerger and not (desc_is_merger or desc_is_final): 
+                out_halos.append(list(atree[np.where(descid==atree[:,idcol])][0])); hrc +=1 # add this descendent to out_halos # if descid=='-1' and '-1' in newdescs: raise ValueError(f"Halo {mid} has descid {descid}, but there is already a final halo added")
+                newdescs.append(descdescid); drc += 1 # add this descendent's descendent to newdescs
+                if debug: print(f"  Since the {'orig' if descid==orig_descid else 'new'} desc is a premerger (and not merger), adding it to halmix [row {hrc}] and adding its own desc to newdescs [row {drc}]")
+
+            # New desc is end_of_chain if it is good but NOT just for high mass gain, if not, set hid to descid and repeat
+            end_of_chain = desc_is_final or desc_is_merger or desc_is_premerger 
+            if not end_of_chain and desc_is_highgain: hid = descid
+        
+        # Checks
+        if hrc != drc: raise ValueError(f"Error: hrc {hrc} != drc {drc}")
+        if len(out_halos[-1]) != len(list(tree.columns)):
+            raise ValueError(f"\n[haloset {num}] Error: row at at out_halos row {hrc} (after proccessing root {c}) has length {len(out_halos[-1])} not n feats {len(list(tree.columns))} \n\thalmix[-1] {out_halos[-1]}")
+
+        c += 1
+
+    tree_out = pd.DataFrame(out_halos, columns=tree.columns)
+    tree_out['newdesc_id'] = newdescs
+
+    for i in range(len(tree_out)):
+        if not (tree_out.iloc[i]['newdesc_id'] in list(tree_out['id(1)']) or tree_out.iloc[i]['newdesc_id'] == '-1'): # this halos original descendent was cut without updateing this halos descendent 
+            print(f"\n[haloset {num}] Error at row {i}: no halos in the tree have this halo's descdendent ({tree_out.iloc[i]['newdesc_id']})");
+            print(f"\nhalo: {list(tree_out.iloc[i])}")
+            print(f"\tlist(tree_out['id(1)'])[0:5]: {list(tree_out['id(1)'])[0:5]}")
+            print(f"\tlist(tree_out['newdesc_id'])[0:5]: {list(tree_out['newdesc_id'])[0:5]}")
+            a=b
+
+    try: 
+        np.array(tree_out, dtype=float)
+    except: 
+        print(f"[haloset {num}] Cant set tree_out to array")
+        for i in range(len(out_halos)):
+            try: np.array(tree_out.iloc[i], dtype=float)
+            except: 
+                print(f"[haloset {num}] Error at row {i}")
+                print(f"halmix[i] \n{out_halos[i]} \nhalmix[i+1] \n{out_halos[i+1]}")
+                print(f"tree_out.iloc[i] \n{list(tree_out.iloc[i])} \ntree_out.iloc[i+1] \n{list(tree_out.iloc[i+1])}"); a=b
+
+
+    unique_ids, counts = np.unique(tree_out['id(1)'], return_counts=True) # np.unique(tree_out['id(1)'], return_counts=True)
+    if np.any(counts > 1):
+        raise ValueError(f"Tree_out has duplicate ids")
+
+
+    #print(f"{len(halmix)})", flush=True) 
+
+    return tree_out
+
 
 
 ###################
@@ -1083,7 +1351,18 @@ def get_subset_path(data_params, set):
     else:
         return osp.expanduser(f'{data_path}{data_file.replace(".pkl", tag)}_train.pkl')  
 
+# debugging helper function
+def load_like_prep(file, featnames = ['#scale(0)', 'desc_scale(2)', 'num_prog(4)', 'Mvir(10)']):
 
+    path = f'/mnt/sdceph/users/sgenel/IllustrisTNG/L75n1820TNG_DM/postprocessing/trees/consistent-trees/' # 127 files
+    # all_names = ['#scale(0)', 'id(1)', 'desc_scale(2)', 'desc_id(3)', 'num_prog(4)', 'pid(5)', 'upid(6)', 'desc_pid(7)', 'phantom(8)', 'sam_Mvir(9)', 'Mvir(10)', 'Rvir(11)', 'rs(12)', 'vrms(13)', 'mmp?(14)', 'scale_of_last_MM(15)', 'vmax(16)', 'x(17)', 'y(18)', 'z(19)', 'vx(20)', 'vy(21)', 'vz(22)', 'Jx(23)', 'Jy(24)', 'Jz(25)', 'Spin(26)', 'Breadth_first_ID(27)', 'Depth_first_ID(28)', 'Tree_root_ID(29)', 'Orig_halo_ID(30)', 'Snap_idx(31)', 'Next_coprogenitor_depthfirst_ID(32)', 'Last_progenitor_depthfirst_ID(33)', 'Last_mainleaf_depthfirst_ID(34)', 'Tidal_Force(35)', 'Tidal_ID(36)', 'Rs_Klypin', 'Mvir_all', 'M200b', 'M200c', 'M500c', 'M2500c', 'Xoff', 'Voff', 'Spin_Bullock', 'b_to_a', 'c_to_a', 'A[x]', 'A[y]', 'A[z]', 'b_to_a(500c)', 'c_to_a(500c)', 'A[x](500c)', 'A[y](500c)', 'A[z](500c)', 'T/|U|', 'M_pe_Behroozi', 'M_pe_Diemer', 'Halfmass_Radius']
+    raw = pd.read_table(f'{path}/{file}', header=0, skiprows=0, delimiter='\s+', usecols = np.linspace(0,30,31, dtype=int), dtype=str).drop(axis=0, index=np.arange(48))
+    halos = raw[~raw.isna()['desc_id(3)']] # rows (nodes)
+    halos = change_dtypes(halos, featnames) 
+    halos = make_zcut(halos, zcut=('before', np.inf))
+    halos = scale(halos, featnames)
+
+    return halos
 
 #############################
 # For just final halos model

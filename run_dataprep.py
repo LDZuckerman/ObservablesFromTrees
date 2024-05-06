@@ -17,7 +17,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-DS_name", "--DS_name", type=str, required=True)
 parser.add_argument("-out_basepath", "--out_basepath", type=str, required=False, default='~/ceph/Data/')
 parser.add_argument("-tng_vol", "--tng_vol", type=str, required=True)
-parser.add_argument("-downsize_method", "--downsize_method", type=str, required=False, default=3)
+parser.add_argument("-downsize_method", "--downsize_method", type=str, required=True)
 parser.add_argument("-testobs", "--testobs", type=bool, required=False, default=False)
 parser.add_argument("-tinytreetest", "--tinytreetest", type=bool, required=False, default=False)
 parser.add_argument("-sizelim", "--sizelim", required=False, default='None')
@@ -59,7 +59,7 @@ if not osp.exists(metafile):
 if not osp.exists(obsfile):  
     print(f'Preparing photometric data, will save to {obsfile}', flush=True)
     if args.testobs: data_utils.prep_mstar(obscat_path, save_path=obsfile)
-    else: data_utils.prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile=metafile, save_path=obsfile, reslim=int(args.reslim))
+    else: data_utils.prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile=metafile, savefile=obsfile, reslim=int(args.reslim))
 else: 
     print(f'Observational data already exists in {obsfile}', flush=True)
 
@@ -70,7 +70,7 @@ if not osp.exists(treefile):
     with open(obsfile, 'rb') as f:
         allobs = pickle.load(f)
     if args.testobs: data_utils.prep_mhaloz0(ctrees_path, mstar_ids=list(allobs.keys()), save_path=treefile)
-    else: data_utils.prep_trees(ctrees_path, featnames, phot_ids=list(allobs.keys()), metafile=metafile, save_path=treefile, sizelim=sizelim, tinytest=args.tinytreetest, downsize_method=int(args.downsize_method))  
+    else: data_utils.prep_trees(ctrees_path, featnames, phot_ids=list(allobs.keys()), metafile=metafile, savefile=treefile, sizelim=sizelim, tinytest=args.tinytreetest, downsize_method=int(args.downsize_method))  
 else:
     print(f'Tree data already exists in {treefile}', flush=True)
 
