@@ -11,9 +11,11 @@ import scipy.stats as stats
 from torch.utils.data import DataLoader as DataLoader_notgeom
 from torch_geometric.loader import DataLoader
 from torch import nn
-# sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
-# from dev import data_utils
-#import dev.data_utils as data_utils
+try: 
+    from dev import data_utils
+except:
+    sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
+    from ObservablesFromTrees.dev import data_utils
 
 # Fit transformer to data
 def fit_transformer(allgraphs, featnames, save_path, transfname, plot=True, return_xt=False):
@@ -87,6 +89,13 @@ def get_loss_func(name):
         l=loss_func
 
     return l
+
+def get_downsize_func(method_num):
+
+    func_name = 'downsize_tree'+str(method_num)
+    function = getattr(data_utils, func_name)
+    
+    return function
 
 
 def test(loader, model, n_targ, get_var = False, get_rho = False, return_x = False):

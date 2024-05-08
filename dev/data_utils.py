@@ -28,7 +28,7 @@ import sklearn.metrics as skmetrics
 import multiprocessing as mp
 
 # Make dictionary of (cm_ID, tree DF) for all trees
-def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('before', np.inf), Mlim=10, sizelim=np.inf, tinytest=False, downsize_method=3, multi=False, min_pctGain=''): 
+def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('before', np.inf), Mlim=10, sizelim=np.inf, tinytest=False, downsize_method='', multi=False, pct_gain_include=10): 
           
     # Prepare to load tree data 
     tree_path = osp.expanduser(ctrees_path)
@@ -38,9 +38,10 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
     # Initialize meta dict
     meta = {'Mlim': str(Mlim), 'sizelim': str(sizelim), 'zcut': str(zcut), 
             'downsize method': downsize_method,
-            'min_pctGain': min_pctGain,
+            'pct gain to include': pct_gain_include,
             'lognames': ['Mvir(10)', 'Mvir_all', 'M200b', 'M200c', 'M2500c', 'M_pe_Behroozi', 'M_pe_Diemer'], 
-            'minmaxcols': ['Jx(23)', 'Jy(24)', 'Jz(25)'],
+            'minmaxnames': ['Jx(23)', 'Jy(24)', 'Jz(25)'],
+            'featnames': featnames, #if not add_gain else featnames + ['gainPct'] # Add 'gainPct' to feat names if adding that
             'start stamp': str(datetime.now())}
     
     # Load files
@@ -49,15 +50,19 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
     if tinytest: treefiles=treefiles[0] # for small set to test on, just use trees in one file
     
     # Process trees in each file, breaking files into sets if multithreading
+    if downsize_method not in [1, 3, 4, 'None']: raise ValueError(f'Invalid downsize method {downsize_method}')
     if not multi: 
-        processing_meta = process_treefiles(treefiles, tree_path, featnames, meta['lognames'], meta['minmaxnames'], zcut, Mlim, sizelim, downsize_method, phot_ids, min_pctGain, save_path=savefile)
+        processing_meta = process_treefiles(treefiles, tree_path, featnames, meta['lognames'], meta['minmaxnames'], zcut, Mlim, sizelim, downsize_method, phot_ids, pct_gain_include, save_path=savefile)
     else:                   
         n_threads = os.cpu_count()
-        filesets = np.array_split(treefiles, n_threads) # it wouldnt really heko to split into more sets then there are cpus, right?
+        filesets = np.array_split(treefiles, n_threads) # it wouldnt really help to split into more sets then there are cpus, right?
+        print(f"Splitting the {len(treefiles)} CT files into {len(filesets)} sets of ~{len(filesets[0])} files each, to be processed by {n_threads} threads.")
         procs_outdir = savefile.replace('_alltrees.pkl', '_procs_temp/')
-        pool = mp.Pool(processes=n_threads)
+        print(f"Creating temporary output directory {procs_outdir} for each thread to store tree and meta files.")
+        os.makedirs(procs_outdir)
+        pool = mp.Pool(processes=n_threads) # 48 processes... why??
         for i in range(len(filesets)):
-            args = (filesets[i], tree_path, featnames, meta['lognames'], meta['minmaxnames'], zcut, Mlim, sizelim, downsize_method, phot_ids, min_pctGain, procs_outdir, i)
+            args = (filesets[i], tree_path, featnames, meta['lognames'], meta['minmaxnames'], zcut, Mlim, sizelim, downsize_method, phot_ids, pct_gain_include, procs_outdir, i)
             pool.apply_async(process_treefiles, args=args)#), callback=response)
         pool.close()
         pool.join()
@@ -67,20 +72,21 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
     meta.update(processing_meta) # add keys and values from processing_meta to meta
     meta['n_threads'] = n_threads if multi else 'NaN'
     meta['Total time'] = np.round(time.time() - t0_all, 4)
-    meta['featnames'] = featnames if not add_gain else featnames + ['gainPct'] # Add 'gainPct' to feat names if adding that
         
     pickle.dump(all_trees, open(savefile, 'wb')) # savefile = name of file containing collected trees from all file sets
     with open(metafile, 'r+') as f: 
         listmeta = json.load(f)
-    if list(listmeta[-1].keys())[0] == 'tree meta': # If tree meta already exists (this is a re-do), remove old tree meta
-        listmeta = listmeta[:-1]
+    # if list(listmeta[-1].keys())[0] == 'tree meta': # If tree meta already exists (this is a re-do), remove old tree meta
+    #     listmeta = listmeta[:-1]
+    if f'tree meta' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: #list(listmeta[-1].keys())[0] == f'{obs_type} meta': # If obs_type meta already exists (this is a re-do), remove old obs_type meta
+        rem_idx = np.where(np.array([list(listmeta[i].keys())[0] for i in range(len(listmeta))]) == f'tree meta')[0][0]
+        listmeta = listmeta.pop(rem_idx) #listmeta[:-1]
     listmeta.append({'tree meta':meta})  
     with open(metafile, 'w') as f:
         json.dump(listmeta, f)
     f.close()
     # if multi: os.rmtree(procs_outdir) # remove temp files
     
-    return 
 
 def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, Mlim, sizelim, downsize_method, phot_ids, min_pctGain, save_path, proc_id=''):
 
@@ -97,13 +103,14 @@ def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, 
    
     # Loop through file set
     proc_name = f"[Proccess {proc_id}]" if proc_id != '' else ''
-    downsize_func = downsize_tree4 if downsize_method == 4 else downsize_tree3 if downsize_method == 3 else downsize_tree1 if downsize_method == 1 else None
+    print(f'\t{proc_name} Begining iteration through {len(fileset)} files', flush=True)
+    downsize_func = downsize_tree4 if downsize_method == '4' else downsize_tree3 if downsize_method == '3' else downsize_tree1 if downsize_method == '1' else None
     fcount = 0
     t0 = time.time()
     for treefile in fileset: 
                 
         # Load tree sets (each file has many trees, with a tree being a header line followed by rows of nodes)
-        print(f'\t{proc_name} Loading trees from {treefile}', flush=True)
+        print(f'\t{proc_name} Loading trees from {treefile} ({fcount} of {len(fileset)})', flush=True)
         t0_file = time.time()
         pd1 = pd.read_table(f'{tree_path}/{treefile}', skiprows=0, delimiter='\s+', dtype=str) # read ALL COLS in (as strings) 
         raw = pd1.drop(axis=0, index=np.arange(48)) # remove rows 0 to 48, which are one large set of comments
@@ -123,6 +130,7 @@ def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, 
         indices = [i for i, x in enumerate(halos['desc_id(3)']) if x == '-1'] # (3/5) THIS WAS NOT '-1' BEFORE! Indices where desc_id is -1 (first line of each tree)
         split_halos = np.split(np.array(halos), np.array(indices[1:])) # list of 2d tree arrays #print(f'\t\tSplitting into {len(split_halos)} individual trees', flush=True)
         set_meta['tot trees'] += len(split_halos)
+        print(f"\t{proc_name} {treefile} has {len(split_halos)} trees", flush=True)
         tcount = 0
         for i in range(len(split_halos)): 
             haloset = split_halos[i]
@@ -143,6 +151,7 @@ def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, 
             # print(f'\t\t\tProcessing haloset {i} into tree', flush=True)
             tcount += 1
             # Remove "unimportant" subhalos and add newdesc_id with updated descendents
+            print(f"\t{proc_name} Downsizeing tree {i} from file {treefile}", flush=True)
             if downsize_method == 4: dtree = downsize_func(tree, min_pctGain, num=i)
             elif downsize_method in [1,3]: dtree = downsize_func(tree, num=i)
             elif downsize_method == 'None': 
@@ -156,10 +165,10 @@ def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, 
         set_meta['tot trees saved'] += tcount
         fcount+=1
 
-        print(f"\t{proc_name} Done with {treefile} ({fcount} of {len(fileset)}). Took {np.round(time.time()-t0_file, 4)}s. Processed {tcount} of {len(split_halos)} trees. {meta['trees mass cut']} mass cut, {meta['trees sat cut']} sats, {meta['trees size cut']} too big, {meta['trees no mergers cut']} no mergers.", flush=True)
+        print(f"\t{proc_name} Done with {treefile} ({fcount} of {len(fileset)}). Took {np.round(time.time()-t0_file, 4)}s. Processed {tcount} of {len(split_halos)} trees", flush=True)
     
     set_meta['total time'] = np.round(time.time() - t0, 4)
-    print(f"\t{proc_name} Done with all files. Took {np.round(time.time() - t0, 4)} s to save {set_meta['tot trees saved']} total trees")
+    print(f"\t{proc_name} Done with all files. Took {np.round(time.time() - t0, 4)} s to save {set_meta['tot trees saved']} total trees", flush=True)
     m =  f'and saving processing meta to {metafile_set}' if proc_id != '' else ''
     print(f'\t{proc_name} Saving trees in {savefile_set} {m}', flush=True) 
     pickle.dump(all_trees_set, open(savefile_set, 'wb'))
@@ -188,17 +197,49 @@ def collect_proc_outputs(procs_outdir):
     return all_trees, processing_meta
 
 # Make dictionary of (subhalo, phot) for all central subhalos
-def prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile, savefile, reslim=100):
+def prep_obs(obscat_path, crossmatchRSSF_path, rstar_path, metafile, savefile, reslim=100, obs_type='phot'):
+    '''
+    PROBABLY SHOULD UPDATE THIS DO STORE BOTH PHOT AND PROPS AT THE SAME TIME NEXT TIME I RUN A NEW DS
+    '''
     # Should I store mstar and res as well? 
     #   Would it make later access easier?
     #   Won't help for looking at other targs, and would still need to re-map to trees, since dont want graphs to include things other)
     #   And already saved in subfind_othertargs.pkl for res = 100 and ctrl cut, which I will probabaly always want
 
-    meta = {'label_names': ["U", "B", "V", "K", "g", "r", "i", "z"], 'reslim': reslim, # Note: had a typo swapping V and B, but I've fixed that
+    if obs_type == 'phot':
+        label_names = ["U", "B", "V", "K", "g", "r", "i", "z"]
+        to_store = 'phot'
+    if obs_type == 'props':
+        label_names = ['SubhaloBHMass', 'SubhaloBHMdot','SubhaloGasMetallicity','SubhaloHalfmassRad','SubhaloMass','SubhaloGasMass','SubhaloStelMass','SubhaloSFR','SubhaloStarMetallicity','SubhaloVelDisp','SubhaloVmax','SubhaloRes']
+        to_store = label_names
+
+    meta = {'label_names': label_names, 'reslim': reslim, # Note: had a typo swapping V and B, but I've fixed that
             'tot galaxies': 0, 'tot galaxies saved': 0, 
             'galaxies res cut': 0, 'galaxies sat cut': 0, 
             'start stamp': str(datetime.now())}
 
+    # Collect phot or props
+    all_obs, meta = collect_targs(to_store, crossmatchRSSF_path, rstar_path, obscat_path, reslim, meta)
+
+    # Save to pickle
+    print(f'\tSaving {obs_type} in {savefile} and meta in {metafile}', flush=True)     
+    with open(savefile, 'wb') as f:
+        pickle.dump(all_obs, f)
+    with open(metafile, 'r+') as f: 
+        listmeta = json.load(f) 
+    if f'{obs_type} meta' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: #list(listmeta[-1].keys())[0] == f'{obs_type} meta': # If obs_type meta already exists (this is a re-do), remove old obs_type meta
+        rem_idx = np.where(np.array([list(listmeta[i].keys())[0] for i in range(len(listmeta))]) == f'{obs_type} meta')[0][0]
+        listmeta = listmeta.pop(rem_idx) #listmeta[:-1]
+    listmeta.append({f'{obs_type} meta': meta}) 
+    with open(metafile, 'w') as f:
+        json.dump(listmeta, f)
+    f.close()
+    
+    return all_obs     
+
+
+def collect_targs(to_store, crossmatchRSSF_path, rstar_path, obscat_path, reslim, meta=None):
+    
     # Load files for crossmatching to rstar IDs
     cmRSSF_list = h5py.File(crossmatchRSSF_path, 'r')['Snapshot_99']['SubhaloIndexDarkRockstar_SubLink'][:]
     rstar_subhalo_ids = np.array(h5py.File(rstar_path, 'r')['Subhalo']['Subhalo_ID'])
@@ -207,52 +248,48 @@ def prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile, savefile, 
     subhalos = il.groupcat.loadSubhalos(basePath = obscat_path, snapNum=99)
     sh_phot = subhalos['SubhaloStellarPhotometrics']
     sh_res = subhalos['SubhaloLenType'][:,4] # 4 for star particles 
-    meta['tot galaxies'] = len(sh_phot)
+    if meta!= None: meta['tot galaxies'] = len(sh_phot)
 
     # Get central subhalo indices
     groups = il.groupcat.loadHalos(basePath = obscat_path, snapNum=99)
     ctl_idxs = groups['GroupFirstSub'] # for each group, the idx w/in "subhalos" that is its central subhalo (-1 if group as no subhalos)
     ctl_idxs = ctl_idxs[ctl_idxs != -1] # remove groups with no subhalos
-    meta['galaxies sat cut'] = len(sh_phot) - len(ctl_idxs)
+    if meta!= None: meta['galaxies sat cut'] = len(sh_phot) - len(ctl_idxs)
 
     # Add photometry for all central subhalos to dict
-    all_phot = {} 
+    all_targs = {} 
     for idx in ctl_idxs:
         # Remove if not central or resolution too low
         if (sh_res[idx] < reslim): 
-            meta['galaxies res cut'] += 1
+            if meta!= None: meta['galaxies res cut'] += 1
             continue
         # Get rstar_id for matching to trees
         subfind_read_idx =  idx
         rstar_read_idx = cmRSSF_list[subfind_read_idx]
         rstar_id = int(rstar_subhalo_ids[rstar_read_idx])
-        # Add phot to dict under rstar_id
-        all_phot[str(rstar_id)] = sh_phot[idx] 
-        meta['tot galaxies saved'] += 1
-
-    # Save to pickle
-    print(f'\tSaving phot in {savefile} and meta in {metafile}', flush=True)     
-    with open(savefile, 'wb') as f:
-        pickle.dump(all_phot, f)
-    #listmeta = [{'obs meta':meta}]
-    # with open(metafile, 'w') as f:
-    #     json.dump(listmeta, f) 
-    with open(metafile, 'r+') as f: # with w+ I cant read it but if I write to it with r+ I cant read the new file
-        listmeta = json.load(f) 
-    if list(listmeta[-1].keys())[0] == 'obs meta': # If graph meta already exists (this is a re-do), remove old obs meta
-        listmeta = listmeta[:-1]
-    listmeta.append({'obs meta':meta}) 
-    with open(metafile, 'w') as f:
-        json.dump(listmeta, f)
-    f.close()
+        # Add obs to dict under rstar_id       
+        if to_store == 'phot':
+            all_targs[str(rstar_id)] = sh_phot[idx] 
+            if meta!= None: meta['tot galaxies saved'] += 1
+        else:
+            info = []
+            info.append(str(int(rstar_id)))
+            for targ in to_store:
+                if targ == 'SubhaloRes': info.append(sh_res[idx])
+                elif targ == 'SubhaloGasMass': info.append(subhalos['SubhaloMassType'][idx,0]) # WAS [IDX][O] BUT I DONT THINK THAT SHOULD BE THE PROBLEM
+                elif targ == 'SubhaloStelMass': info.append(subhalos['SubhaloMassType'][idx,4])
+                else: info.append(subhalos[targ][idx])          
+            all_targs[str(rstar_id)] = info # all_targs.loc[len(all_targs)] = info
     
-    return all_phot        
+    if meta == None:
+        return all_targs
+    return all_targs, meta
 
-# Combine prepared trees and TNG subfind photometry into pytorch data objects
+
+# Combine prepared trees and TNG subfind targets into pytorch data objects
 def make_graphs(alltrees, allobs, featnames, metafile, save_path): 
     '''
     Combine trees and corresponding targets into graph data objects
-    NOTE: decide if best to apply fitted transformer here, or later (not going to do it in prep_trees to allow more flexibility')
     '''
     
     meta = {'num graphs':0, 'start stamp': str(datetime.now())}
@@ -263,35 +300,14 @@ def make_graphs(alltrees, allobs, featnames, metafile, save_path):
     dat = []
     for rstar_id in list(alltrees.keys()): # Loop through tree keys becasue tree dict wont have any keys not in obs dict
         tree = alltrees[str(rstar_id)]
-        #print(f"\t   Tree {count} (rockstar ID {rstar_id}), {len(tree)} halos", flush=True); count += 1
         # Create x tensor
         data = np.array(tree[featnames], dtype=float)
         X = torch.tensor(data, dtype=torch.float) 
         # Create y tensor 
         targs = allobs[rstar_id]
         y = torch.tensor(targs, dtype=torch.float) 
-        # Create edge_index tensor # Should just have one tuple for every prog in the tree (all haloes except last), right? Like, should be n_halos - 1 progs, right?
-        progs = []
-        descs = []
-        for i in range(len(tree)):
-            halo = tree.iloc[i]
-            try:
-                desc_id = halo['newdesc_id'] 
-            except KeyError:
-                desc_id = halo['olddesc_id'] # forgot to rename desc_id to newdesc_id in prep_trees, and then acidentally did keep the rename to olddesc_id
-            if (desc_id != '-1'): # this halo has a desc (not the final halo)
-                # try: print(f"\t      halo {i}, desc_id {desc_id}, desc_pos {np.where(tree['id(1)']==desc_id)}")
-                # except: print(f"\t      halo {i}, desc_id {desc_id}")
-                desc_pos = np.where(tree['id(1)']==desc_id)[0][0] # only reason that this halos descid would NOT be in halo ids would be if somehow its desc got cut and its descid wasnt updated
-                progs.append(i)
-                descs.append(desc_pos) 
-        # print(f'\t\t\tshape X {X.shape} (should be [{len(tree)}, {len(featnames)}])', flush=True)
-        # print(f'\t\t\tshape y {y.shape} (should be [1, 8])', flush=True)
-        # print(f'\t\t\tlen(progs) {len(progs)} (should be {len(tree) - 1})', flush=True)
-        edge_index = torch.tensor([progs,descs], dtype=torch.long) 
-        # Create edge_attr tensor
-        edges = np.full(len(progs),np.NaN)
-        edge_attr = torch.tensor(edges, dtype=torch.float)
+        # Create edge_index tensor (one tuple for every prog in the tree (all haloes except last))
+        edge_index, edge_attr = make_edges(tree)
         # Combine into graph and add graph dat list
         graph = Data(x=X, edge_index=edge_index, edge_attr=edge_attr, y=y)
         dat.append(graph)  
@@ -300,13 +316,17 @@ def make_graphs(alltrees, allobs, featnames, metafile, save_path):
                 
     # Save pickled dataset
     print(f'Saving dataset to {save_path} and adding meta to {metafile}', flush=True) 
-    with open(osp.expanduser(save_path), 'wb') as handle:
-        pickle.dump(dat, handle)
+    with open(osp.expanduser(save_path), 'wb') as f:
+        pickle.dump(dat, f)
     with open(metafile, 'r+') as f: # with w+ I cant read it but if I write to it with r+ I cant read the new file
         listmeta = json.load(f) 
-    if list(listmeta[-1].keys())[0] == 'graph meta': # If graph meta already exists (this is a re-do), remove old graph meta
-        listmeta = listmeta[:-1]
-    listmeta.append({'graph meta':meta}) 
+    # if list(listmeta[-1].keys())[0] == 'graph meta': # If graph meta already exists (this is a re-do), remove old graph meta
+    #     listmeta = listmeta[:-1]
+    tag = '' if 'props' not in save_path else ' props'
+    if f'graph meta{tag}' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: #list(listmeta[-1].keys())[0] == f'{obs_type} meta': # If obs_type meta already exists (this is a re-do), remove old obs_type meta
+        rem_idx = np.where(np.array([list(listmeta[i].keys())[0] for i in range(len(listmeta))]) == f'graph meta')[0][0]
+        listmeta = listmeta.pop(rem_idx) #listmeta[:-1]
+    listmeta.append({f'graph{tag} meta':meta}) 
     with open(metafile, 'w') as f:
         json.dump(listmeta, f)
 
@@ -319,8 +339,7 @@ def make_edges(tree):
     progs = []; descs = []
     for i in range(len(tree)):
         halo = tree.iloc[i]
-        try: desc_id = halo['newdesc_id'] 
-        except KeyError: desc_id = halo['olddesc_id'] # forgot to rename desc_id to newdesc_id in prep_trees, and then acidentally did keep the rename to olddesc_id
+        desc_id = halo['newdesc_id'] # try: desc_id = halo['newdesc_id']  except KeyError: desc_id = halo['olddesc_id'] # forgot to rename desc_id to newdesc_id in prep_trees, and then acidentally did keep the rename to olddesc_id
         if (desc_id != '-1'): 
             desc_pos = np.where(tree['id(1)']==desc_id)[0][0] 
             progs.append(i)
@@ -332,11 +351,12 @@ def make_edges(tree):
     return edge_index, edge_attr
 
 def response(result):
-    results.append(result)
+    result.append(result)
 
  # Collect other targets for the same galaxies as in the photometry
 def collect_othertargs(obscat_path, alltrees, volname, save_path, reslim=100):
     '''
+    THIS FUNCTION NEEDS TO GO AWAY: SHOULD BE DOING THE SAME THING AS RUNNING COLLECT_TARGS WITH TO_STORE DICT, EXCEPT FOR STORING AS {RSTAR_ID, list}, NOT JUST DF WITH RSTAR_ID COL
     The graphs in allgraphs are a SUBSET of the galaxies in all_obs, so this will be tricky
     Recreate prep_phot but return other SG targs instead (but still with rstar idx as key)
     Then receate make_graphs, but instead of making the graphs, just stack the targs for the gals with the rstar idxs that are in alltrees
@@ -1148,7 +1168,6 @@ def downsize_tree4(tree, num, add_gain=False, min_gainPct = 10, debug=False):
     return tree_out
 
 
-
 ###################
 # Debuging functions
 ###################
@@ -1363,6 +1382,7 @@ def load_like_prep(file, featnames = ['#scale(0)', 'desc_scale(2)', 'num_prog(4)
     halos = scale(halos, featnames)
 
     return halos
+
 
 #############################
 # For just final halos model

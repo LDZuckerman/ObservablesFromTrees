@@ -7,7 +7,7 @@ from datetime import date
 from dev import data_utils
 
 '''
-Note: This script will take ~xx hr, so to remove the need for repeat runs:
+Note: Processing trees takes forever, so to remove the need for repeat runs:
   - all CTrees columns are saved in tree files
   - all feature columns are saved in graph files
 '''
@@ -18,10 +18,11 @@ parser.add_argument("-DS_name", "--DS_name", type=str, required=True)
 parser.add_argument("-out_basepath", "--out_basepath", type=str, required=False, default='~/ceph/Data/')
 parser.add_argument("-tng_vol", "--tng_vol", type=str, required=True)
 parser.add_argument("-downsize_method", "--downsize_method", type=str, required=True)
-parser.add_argument("-testobs", "--testobs", type=bool, required=False, default=False)
+parser.add_argument("-prep_props", "--prep_props", required=False, default=False)
 parser.add_argument("-tinytreetest", "--tinytreetest", type=bool, required=False, default=False)
 parser.add_argument("-sizelim", "--sizelim", required=False, default='None')
 parser.add_argument("-reslim", "--reslim", required=False, default=100)
+parser.add_argument("-multi", "--multi", required=False, default=False)
 parser.add_argument("-transform_name", "--transform_name", type=str, required=False, default='QuantileTransformer')
 args = parser.parse_args()
 sizelim = np.inf if args.sizelim == 'None' else int(args.sizelim)
@@ -32,8 +33,8 @@ if not osp.exists(outdir):
     print(f'Creating output directory {outdir}', flush=True)
     os.makedirs(outdir)
 outpath = osp.expanduser(f'{outdir}{args.DS_name}')
-metafile = osp.expanduser(f'{outpath}_meta.json')
-obsfile = osp.expanduser(f'{outpath}_allobs.pkl')
+metafile = osp.expanduser(f'{outpath}_meta.json') 
+photfile = osp.expanduser(f'{outpath}_allphot.pkl') # rename from allobs to allphot for clarity
 treefile = osp.expanduser(f'{outpath}_alltrees.pkl')
 graphfile = osp.expanduser(f'{outpath}.pkl')
 volnames = {'100':'L75n1820TNG', '300':'L205n2500TNG', '50':'L35n2160TNG'}
@@ -53,34 +54,51 @@ listmeta = [{'set meta': {'Volume':args.tng_vol, 'TreeSizeLim':args.sizelim, 'Da
 if not osp.exists(metafile):
     with open(metafile, 'w') as f:
         json.dump(listmeta, f) 
-    f.close()
+    f.close()  
 
 # Prepare and save photometric data
-if not osp.exists(obsfile):  
-    print(f'Preparing photometric data, will save to {obsfile}', flush=True)
-    if args.testobs: data_utils.prep_mstar(obscat_path, save_path=obsfile)
-    else: data_utils.prep_phot(obscat_path, crossmatchRSSF_path, rstar_path, metafile=metafile, savefile=obsfile, reslim=int(args.reslim))
+if not osp.exists(photfile):  
+    print(f'Preparing photometric data, will save to {photfile}', flush=True)
+    data_utils.prep_obs(obscat_path, crossmatchRSSF_path, rstar_path, metafile=metafile, savefile=photfile, reslim=int(args.reslim))  #if bool(args.testobs): data_utils.prep_mstar(obscat_path, save_path=obsfile)
 else: 
-    print(f'Observational data already exists in {obsfile}', flush=True)
+    print(f'Photometric data already exists in {photfile}', flush=True)
 
 # Prepare and save tree data 
 if not osp.exists(treefile):
     print(f'Preparing tree data, will save to {treefile}', flush=True)
-    print(f'\tLoading photometric data from {obsfile}', flush=True)
-    with open(obsfile, 'rb') as f:
-        allobs = pickle.load(f)
-    if args.testobs: data_utils.prep_mhaloz0(ctrees_path, mstar_ids=list(allobs.keys()), save_path=treefile)
-    else: data_utils.prep_trees(ctrees_path, featnames, phot_ids=list(allobs.keys()), metafile=metafile, savefile=treefile, sizelim=sizelim, tinytest=args.tinytreetest, downsize_method=int(args.downsize_method))  
+    print(f'\tLoading photometric data from {photfile}', flush=True)
+    allobs = pickle.load(open(photfile, 'rb'))
+    data_utils.prep_trees(ctrees_path, featnames, phot_ids=list(allobs.keys()), metafile=metafile, savefile=treefile, sizelim=sizelim, tinytest=args.tinytreetest, downsize_method=int(args.downsize_method), multi=bool(args.multi))  
 else:
     print(f'Tree data already exists in {treefile}', flush=True)
 
 # Prepare and save graphs
-if not args.testobs:
-    print(f'Preparing graphs, will save to {graphfile}', flush=True)
-    print(f'\tLoading obs data from {obsfile}', flush=True)
-    with open(obsfile, 'rb') as f:
-        allobs = pickle.load(f)
+print(f'Preparing graphs, will save to {graphfile}', flush=True)
+print(f'\tLoading phot data from {photfile}', flush=True)
+allobs = pickle.load(open(photfile, 'rb'))
+print(f'\tLoading tree data from {treefile}', flush=True)
+alltrees = pickle.load(open(treefile, 'rb'))
+data_utils.make_graphs(alltrees, allobs, featnames, metafile, save_path=graphfile) # transformer = skp.QuantileTransformer(n_quantiles=10, random_state=0)
+
+######################################
+# If want to prep props graphs as well
+######################################
+
+if bool(args.prep_props):
+
+    # Prepare and save properties data, if desired
+    propsfile = osp.expanduser(f'{outpath}_allprops.pkl') # if prep_props
+    if bool(args.prep_props) and not osp.exists(propsfile):  
+        print(f'Preparing properties data, will save to {propsfile}', flush=True)
+        data_utils.prep_obs(obscat_path, crossmatchRSSF_path, rstar_path, metafile=metafile, savefile=propsfile, reslim=int(args.reslim), obs_type='props')  #if bool(args.testobs): data_utils.prep_mstar(obscat_path, save_path=obsfile)
+    else: 
+        print(f'Properties data already exists in {propsfile}', flush=True) 
+
+    # Prepare and save graphs
+    graphfile_props = osp.expanduser(f'{outpath}props.pkl')
+    print(f'Preparing graphs with props, will save to {graphfile_props}', flush=True)
+    print(f'\tLoading props data from {propsfile}', flush=True)
+    allprops = pickle.load(open(propsfile, 'rb'))
     print(f'\tLoading tree data from {treefile}', flush=True)
-    with open(treefile, 'rb') as f:
-        alltrees = pickle.load(f)
-    data_utils.make_graphs(alltrees, allobs, featnames, metafile, save_path=graphfile) # transformer = skp.QuantileTransformer(n_quantiles=10, random_state=0)
+    alltrees = pickle.load(open(treefile, 'rb'))
+    data_utils.make_graphs(alltrees, allprops, featnames, metafile, save_path=graphfile_props) # transformer = skp.QuantileTransformer(n_quantiles=10, random_state=0)
