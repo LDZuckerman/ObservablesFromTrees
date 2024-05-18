@@ -1,27 +1,22 @@
-from calendar import c
-from tkinter import font
-from tkinter.ttk import LabeledScale
-from attr import s
+
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import numpy as np
 import matplotlib as mpl
 import scipy.stats as stats
 import pickle, json
-import sys
-import os.path as osp
-import pandas as pd
-from torch.nn import functional as tf
-from scipy import special, stats
-import matplotlib.pyplot as pl
 import networkx as nx
-import torch_geometric as tg
 from itertools import count
+import torch
+import torch_geometric as tg
+from torch_geometric.data import Data
+import os, sys
+import pandas as pd
 try: 
     from dev import data_utils
 except:
     sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
-    from ObservablesFromTrees.dev import data_utils, run_utils
+    from ObservablesFromTrees.dev import data_utils
 
 def multi_base(ys, pred, targets):
     ''' 
@@ -683,7 +678,7 @@ def plot_PS_band_compare(taskdir, dataset, models = ['exp3', 'exp4', 'exp6'], by
 ###########
 
 
-def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False, colorby='mass'):
+def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False, colorbymass=True, node_ids='None'):
 
     ####
     # Is k mass? That would seem like a good chance to color nodes by, and its what he has is colorbar titled
@@ -704,34 +699,41 @@ def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False, colorb
     hpos = hierarchy_pos(G.reverse())
     for p in hpos.keys():
         hpos[p] = [hpos[p][0]*1.05, -posy[p]]
-
-    di = nx.betweenness_centrality(G)
-    featr = []
-    for q, key in enumerate(di.keys()):
-        feat = x[q][masscol] #feat = transformer[tkeys[k]].inverse_transform(graph.x.numpy()[q,k].reshape(-1, 1))[0][0]
-        featr.append(feat)
-        di[key] = feat
-    nx.set_node_attributes(G, di, 'Mvir') # just a typo that he was calling this n_prog??
-    labels = nx.get_node_attributes(G, 'Mvir') # dict of  "index: value" pairs 
-    masses = set(labels.values()) # just a typo that he was calling this progs??
-
-    nodes = G.nodes()#; print([n for n in nodes])
-    if colorby == 'mass':
+    nodes = G.nodes()
+    
+    if colorbymass:
+        di = nx.betweenness_centrality(G)
+        featr = []
+        for q, key in enumerate(di.keys()):
+            feat = x[q][masscol] #feat = transformer[tkeys[k]].inverse_transform(graph.x.numpy()[q,k].reshape(-1, 1))[0][0]
+            featr.append(feat)
+            di[key] = feat
+        nx.set_node_attributes(G, di, 'Mvir') # just a typo that he was calling this n_prog??
+        labels = nx.get_node_attributes(G, 'Mvir') # dict of  "index: value" pairs 
+        masses = set(labels.values()) # just a typo that he was calling this progs??
+        node_size = (x[:,masscol]-min(x[:,3])+1) # **1.2
         mapping = dict(zip(sorted(masses),count())) # should be dict of   # sorted() sorts by first value (scale)
-        colors = [mapping[G.nodes[n]['Mvir']] for n in nodes] #colors = [G.nodes[n]['Mvir'] for n in nodes] 
-    # if colorby == 'massdiff':
-    #     ms = np.array(list(labels.values()))
-    #     diffs = [0] + [ms[i]-ms[i-1] for i in range(1,len(masses))]
-    #     mapping = dict(zip(sorted(diffs),count())) # should be dict of   # sorted() sorts by first value (scale)
-    #     colors = [0] + [mapping[G.nodes[i-1]['Mvir']-G.nodes[i]['Mvir']] for i in range(1,len(nodes))] # [mapping[G.nodes[n-1]['Mvir']-G.nodes[n]['Mvir']] for n in nodes]
+        #colors = [G.nodes[n]['Mvir'] for n in nodes] 
+        colors = [mapping[G.nodes[n]['Mvir']] for n in nodes]
+    elif not isinstance(node_ids, str): 
+        colors = ['w' for n in nodes]
+    else:
+        colors = ['b' for n in nodes]
+
 
     # label_zpos = np.unique(1/x[:,scalecol] - 1) #  scale = 1/(1+z)    # np.unique(1/transformer[0].inverse_transform(feats[:,0].reshape(-1,1))-1)
     label_ypos = np.linspace(0, -100, 20)
     labels = np.round(0.11*label_ypos + 11) # 0.11*label_ypos - 11, 1)
-    rs = np.round(np.percentile(featr, np.linspace(0,100,8)),1)
     ec = nx.draw_networkx_edges(G, hpos, alpha=0.9, width=0.5, arrows=False, ax=ax)
-    node_size = (x[:,masscol]-min(x[:,3])+1) # **1.2
-    nc = nx.draw_networkx_nodes(G, hpos, nodelist=nodes, node_color=colors, node_size=(node_size), cmap=plt.cm.jet, ax=ax)
+
+    if not isinstance(node_ids, str):
+        node_ids = pd.Series([id[:-3] for id in node_ids])
+        nc = nx.draw_networkx_nodes(G, hpos, nodelist=nodes, node_color=colors, node_size=30, ax=ax)
+        nx.draw_networkx_labels(G, hpos, labels=node_ids, font_size=8, ax=ax)
+    elif colorbymass:
+        nc = nx.draw_networkx_nodes(G, hpos, nodelist=nodes, node_color=colors, node_size=(node_size), cmap=plt.cm.jet, ax=ax)
+    else:
+        nc = nx.draw_networkx_nodes(G, hpos, nodelist=nodes, node_color=colors, node_size=30, ax=ax)
 
     if first:
         ax.tick_params(left=True, bottom=False, labelleft=True, labelbottom=True)
@@ -740,11 +742,33 @@ def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False, colorb
         ax.set(ylabel='Redshift')
     if last:
         if not first: ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=True)
-        cbar = fig.colorbar(nc, shrink=0.5, ax=ax)
-        cbar.ax.set_yticklabels(rs)
-        ylabel = r'Halo gain [log($M_h/M_{\odot}$)]'  if colorby == 'massdiff' else r'Halo mass [log($M_h/M_{\odot}$)]' 
-        cbar.set_label(ylabel) # cbar.set_label('Redshift')
+        if isinstance(node_ids, str) and colorbymass:
+            rs = np.round(np.percentile(featr, np.linspace(0,100,8)),1)
+            cbar = fig.colorbar(nc, shrink=0.5, ax=ax)
+            cbar.ax.set_yticklabels(rs)
+            cbar.set_label(r'Halo mass [log($M_h/M_{\odot}$)]') # cbar.set_label('Redshift')
     ax.set_xticks([])
+
+    return fig
+
+
+def plot_trees_compare(tree_list, labels_list, featnames=['#scale(0)','desc_scale(2)','num_prog(4)','Mvir(10)']):
+
+    fig, axs = plt.subplots(1, len(tree_list), figsize=(len(tree_list)*7, 7), layout='constrained', sharey=True)
+
+
+    for i in range(len(tree_list)): 
+        axs[i].set_title(labels_list[i])
+        tree = tree_list[i]
+        if len(tree) > 12000: 
+            axs[i].text(0.2,0.5, f"Too many halos for efficient plotting ({len(tree)})", transform=axs[i].transAxes)
+            continue
+        data = np.array(tree[featnames], dtype=float)
+        X = torch.tensor(data, dtype=torch.float) 
+        y = torch.tensor(np.nan, dtype=torch.float) 
+        edge_index, edge_attr = data_utils.make_edges(tree)
+        graph = Data(x=X, edge_index=edge_index, edge_attr=edge_attr, y=y)
+        fig = plot_tree(graph, scalecol=0, masscol=3, fig=fig, ax=axs[i], first=True)
 
     return fig
 
@@ -797,6 +821,7 @@ def hierarchy_pos(G, root=None, width=1., vert_gap = 0.2, vert_loc = 0, leaf_vs_
 
     xcenter: horizontal location of root
     '''
+
     if not nx.is_tree(G):
         raise TypeError('cannot use hierarchy_pos on a graph that is not a tree')
 
@@ -853,6 +878,7 @@ def hierarchy_pos(G, root=None, width=1., vert_gap = 0.2, vert_loc = 0, leaf_vs_
         leafcount = len([node for node in nx.descendants(G, root) if G.out_degree(node)==0])
     elif isinstance(G, nx.Graph):
         leafcount = len([node for node in nx.node_connected_component(G, root) if G.degree(node)==1 and node != root])
+
     rootpos, leafpos, leaf_count = _hierarchy_pos(G, root, 0, width, 
                                                     leafdx=width*1./leafcount, 
                                                     vert_gap=vert_gap, 
@@ -867,7 +893,163 @@ def hierarchy_pos(G, root=None, width=1., vert_gap = 0.2, vert_loc = 0, leaf_vs_
         pos[node]= (pos[node][0]*width/xmax, pos[node][1])
     return pos
 
-        
+def plot_tree_OLD(graph, scalecol, masscol, fig, ax, first=False, last=False):
+    ######
+    # OLD
+    ######
+    
+    x = graph.x.numpy()
+    G = tg.utils.to_networkx(graph)
+    # posy=[]
+    # a_vals, counts = np.unique(x[:,scalecol], return_counts=True)
+    # for a in x[:,scalecol]:
+    #     posy.append(np.where(a==a_vals)[0][0]) 
+    posy = 106.667*x[:,scalecol] - 6.667
+    hpos = hierarchy_pos_OLD(G.reverse())
+    for p in hpos.keys():
+        hpos[p] = [hpos[p][0]*1.05, -posy[p]]
+    di = nx.betweenness_centrality(G)
+    featr = []
+    for q, key in enumerate(di.keys()):
+        feat = x[q][masscol] #feat = transformer[tkeys[k]].inverse_transform(graph.x.numpy()[q,k].reshape(-1, 1))[0][0]
+        featr.append(feat)
+        di[key] = feat
+    nx.set_node_attributes(G, di, 'Mvir') # just a typo that he was calling this n_prog??
+    labels = nx.get_node_attributes(G, 'Mvir') # dict of  "index: value" pairs 
+    masses = set(labels.values()) # just a typo that he was calling this progs??
+    mapping = dict(zip(sorted(masses),count())) # should be dict of   # sorted() sorts by first value (scale)
+    nodes = G.nodes()
+    #colors = [G.nodes[n]['Mvir'] for n in nodes] 
+    colors = [mapping[G.nodes[n]['Mvir']] for n in nodes]
+    # label_zpos = np.unique(1/x[:,scalecol] - 1) #  scale = 1/(1+z)    # np.unique(1/transformer[0].inverse_transform(feats[:,0].reshape(-1,1))-1)
+    label_ypos = np.linspace(0, -100, 20)
+    labels = np.round(0.11*label_ypos + 11) # 0.11*label_ypos - 11, 1)
+    rs = np.round(np.percentile(featr, np.linspace(0,100,8)),1)
+    #ec = nx.draw_networkx_edges(G, hpos, alpha=0.9, width=0.5, arrows=False, ax=ax)
+    node_size = (x[:,masscol]-min(x[:,3])+1) # **1.2
+    nc = nx.draw_networkx_nodes(G, hpos, nodelist=nodes, node_color=colors, node_size=(node_size), cmap=plt.cm.jet, ax=ax)
+
+    if first:
+        ax.tick_params(left=True, bottom=False, labelleft=True, labelbottom=True)
+        ax.set(yticks = label_ypos) #ax.set(yticks=-np.linspace(0, max(zs), 100)[1::6]) #ax.set(yticks=-np.arange(len(zs))[1::6])
+        ax.set_yticklabels(labels) #ax.set_yticklabels(np.round(zs[:-1],1)[::-6])
+        ax.set(ylabel='Redshift')
+    if last:
+        if not first: ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=True)
+        cbar = fig.colorbar(nc, shrink=0.5, ax=ax)
+        cbar.ax.set_yticklabels(rs)
+        cbar.set_label(r'Halo mass [log($M_h/M_{\odot}$)]') # cbar.set_label('Redshift')
+    ax.set_xticks([])
+    return fig
+
+def hierarchy_pos_OLD(G, root=None, width=1., vert_gap = 0.2, vert_loc = 0, leaf_vs_root_factor = 0.5):
+    '''
+    OLD
+
+    If the graph is a tree this will return the positions to plot this in a 
+    hierarchical layout.
+    
+    Based on Joel's answer at https://stackoverflow.com/a/29597209/2966723,
+    but with some modifications.  
+    We include this because it may be useful for plotting transmission trees,
+    and there is currently no networkx equivalent (though it may be coming soon).
+    
+    There are two basic approaches we think of to allocate the horizontal 
+    location of a node.  
+    
+    - Top down: we allocate horizontal space to a node.  Then its ``k`` 
+      descendants split up that horizontal space equally.  This tends to result
+      in overlapping nodes when some have many descendants.
+    - Bottom up: we allocate horizontal space to each leaf node.  A node at a 
+      higher level gets the entire space allocated to its descendant leaves.
+      Based on this, leaf nodes at higher levels get the same space as leaf
+      nodes very deep in the tree.  
+      
+    We use use both of these approaches simultaneously with ``leaf_vs_root_factor`` 
+    determining how much of the horizontal space is based on the bottom up 
+    or top down approaches.  ``0`` gives pure bottom up, while 1 gives pure top
+    down.   
+    
+    
+    :Arguments: 
+    
+    **G** the graph (must be a tree)
+    **root** the root node of the tree 
+    - if the tree is directed and this is not given, the root will be found and used
+    - if the tree is directed and this is given, then the positions will be 
+      just for the descendants of this node.
+    - if the tree is undirected and not given, then a random choice will be used.
+    **width** horizontal space allocated for this branch - avoids overlap with other branches
+    **vert_gap** gap between levels of hierarchy
+    **vert_loc** vertical location of root
+    
+    **leaf_vs_root_factor**
+    xcenter: horizontal location of root
+    '''
+    if not nx.is_tree(G):
+        raise TypeError('cannot use hierarchy_pos on a graph that is not a tree')
+    if root is None:
+        if isinstance(G, nx.DiGraph):
+            root = next(iter(nx.topological_sort(G)))  #allows back compatibility with nx version 1.11
+        else:
+            root = random.choice(list(G.nodes))
+    def _hierarchy_pos_OLD(G, root, leftmost, width, leafdx = 0.2, vert_gap = 0.2, vert_loc = 0, 
+                    xcenter = 0.5, rootpos = None, 
+                    leafpos = None, parent = None):
+        '''
+        see hierarchy_pos docstring for most arguments
+        pos: a dict saying where all nodes go if they have been assigned
+        parent: parent of this branch. - only affects it if non-directed
+        '''
+
+        if rootpos is None:
+            rootpos = {root:(xcenter,vert_loc)}
+        else:
+            rootpos[root] = (xcenter, vert_loc)
+        if leafpos is None:
+            leafpos = {}
+        children = list(G.neighbors(root))
+        leaf_count = 0
+        if not isinstance(G, nx.DiGraph) and parent is not None:
+            children.remove(parent)  
+        if len(children)!=0:
+            rootdx = width/len(children)
+            nextx = xcenter - width/2 - rootdx/2
+            for child in children:
+                nextx += rootdx
+                rootpos, leafpos, newleaves = _hierarchy_pos_OLD(G,child, leftmost+leaf_count*leafdx, 
+                                    width=rootdx, leafdx=leafdx,
+                                    vert_gap = vert_gap, vert_loc = vert_loc-vert_gap, 
+                                    xcenter=nextx, rootpos=rootpos, leafpos=leafpos, parent = root)
+                leaf_count += newleaves
+            leftmostchild = min((x for x,y in [leafpos[child] for child in children]))
+            rightmostchild = max((x for x,y in [leafpos[child] for child in children]))
+            leafpos[root] = ((leftmostchild+rightmostchild)/2, vert_loc)
+        else:
+            leaf_count = 1
+            leafpos[root]  = (leftmost, vert_loc)
+#        pos[root] = (leftmost + (leaf_count-1)*dx/2., vert_loc)
+#        print(leaf_count)
+        return rootpos, leafpos, leaf_count
+    xcenter = width/2.
+    if isinstance(G, nx.DiGraph):
+        leafcount = len([node for node in nx.descendants(G, root) if G.out_degree(node)==0])
+    elif isinstance(G, nx.Graph):
+        leafcount = len([node for node in nx.node_connected_component(G, root) if G.degree(node)==1 and node != root])
+    rootpos, leafpos, leaf_count = _hierarchy_pos_OLD(G, root, 0, width, 
+                                                    leafdx=width*1./leafcount, 
+                                                    vert_gap=vert_gap, 
+                                                    vert_loc = vert_loc, 
+                                                    xcenter = xcenter)
+    pos = {}
+    for node in rootpos:
+        pos[node] = (leaf_vs_root_factor*leafpos[node][0] + (1-leaf_vs_root_factor)*rootpos[node][0], leafpos[node][1]) 
+#    pos = {node:(leaf_vs_root_factor*x1+(1-leaf_vs_root_factor)*x2, y1) for ((x1,y1), (x2,y2)) in (leafpos[node], rootpos[node]) for node in rootpos}
+    xmax = max(x for x,y in pos.values())
+    for node in pos:
+        pos[node]= (pos[node][0]*width/xmax, pos[node][1])
+    return pos       
+
 def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=100):
     new_cmap = mpl.colors.LinearSegmentedColormap.from_list(
         'trunc({n},{a:.2f},{b:.2f})'.format(n=cmap.name, a=minval, b=maxval),

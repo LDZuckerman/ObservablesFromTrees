@@ -3,11 +3,10 @@ Save exp.json file in parent directory of ObservablesFromTrees
 In parent directory, run 'python ObservablesFromTrees/run_experiment.py -f exp.json -gpu 1'
 '''
 
+print(f"Running {__file__}")
+
 import os, json, shutil, argparse
 import os.path as osp
-from tkinter import FALSE
-from networkx import hypercube_graph
-from sympy import hyper, print_ccode
 import dev.train_script as train_script
 
 # Read in arguements 

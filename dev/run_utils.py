@@ -15,12 +15,11 @@ import scipy.stats as stats
 from torch.utils.data import DataLoader as DataLoader_notgeom
 from torch_geometric.loader import DataLoader
 from torch import nn
-from itertools import product
 try: 
-    from dev import data_utils, models, loss_funcs
-except ModuleNotFoundError:
+    from dev import data_utils
+except:
     sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
-    from ObservablesFromTrees.dev import data_utils, loss_funcs, models
+    from ObservablesFromTrees.dev import data_utils
 
 # Fit transformer to data
 def fit_transformer(allgraphs, featnames, save_path, transfname, plot=True, return_xt=False):
@@ -95,6 +94,13 @@ def get_loss_func(name):
 
     return l
 
+def get_downsize_func(method_num):
+
+    func_name = 'downsize_tree'+str(method_num)
+    function = getattr(data_utils, func_name)
+    
+    return function
+
 
 def test(loader, model, n_targ, get_var = False, return_x = False):
     '''
@@ -168,7 +174,6 @@ def final_test(taskdir, modelname):
 
     return ys, preds, metrics
 
-
 '''
 For comparing to simple MLP
 '''
@@ -231,7 +236,6 @@ def run_simplemodel(taskdir, predict_mu_sig, loss_fn, hidden_layers=1, n_epochs=
     json.dump(config, open(f'{modelpath.replace(".pt", "")}_config.json', 'w'))
 
     return ys, preds, metrics
-
     
 # Train simple model
 def simple_train(model, trainloader, predict_mu_sig, loss_fn, lr, n_epochs=100, debug=False, name=''):
@@ -293,6 +297,85 @@ def simple_test(loader, model, get_var):
         preds = yhats
 
     return ys, preds
+
+# ''' HOW DID I END UP WITH THESE VERSIONS?? MAIN HAS THE UPDATED ONES!!! DID I FORGET TO PULL DOWN MAIN BEFORE MAKING NEW BRANCH? CRAP. WHAT ELSE IS AND OLS VERSION???
+# For comparing to simple MLP
+# '''
+# def run_simplemodel(taskdir):
+
+#     # Hardcoded parameters 
+#     datapath = '/mnt/home/lzuckerman/ceph/Data/vol100/'
+#     dataset = 'DS1'
+#     data_meta = json.load(open(f"{datapath}{dataset}_meta.json", 'rb'))
+#     all_labelnames = data_meta[1]['obs meta']['label_names'] 
+#     all_featnames = data_meta[2]['tree meta']['featnames']
+#     use_feats = ['#scale(0)', 'desc_scale(2)', 'Mvir(10)', 'Rvir(11)']
+
+#     # Train (if not already trained)
+#     if not osp.exists(f'{taskdir}/model_justfinalhalos.pt'):
+
+#         # Create simple dataset (if not already created)
+#         if not os.path.exists(f'{datapath}{dataset}_finalhalosdata.pkl'):
+#             usetarg_idxs = [all_labelnames.index(targ) for targ in all_labelnames] 
+#             used_featidxs = [all_featnames.index(f) for f in all_featnames if f in use_feats]
+#             allgraphs = pickle.load(open(f"{datapath}{dataset}.pkl", 'rb'))
+#             traintransformer_path = osp.expanduser(f"{datapath}{dataset}_QuantileTransformer_train.pkl") 
+#             ft_train = pickle.load(open(traintransformer_path, 'rb')) # SHOULD REALLY BE USING SEPERATE TRANSFORMERS FOR TRAIN AND TEST BUT ACCIDENTALLY DIDNT SAVE TEST ONE YET
+#             sm_traindata, sm_testdata = data_utils.data_finalhalos(allgraphs, used_featidxs, usetarg_idxs, ft_train) # data_utils.data_fake()
+#             pickle.dump((sm_traindata, sm_testdata), open(f'{datapath}{dataset}_finalhalosdata.pkl', 'wb'))
+        
+#         # Train simple model
+#         sm_traindata, sm_testdata = pickle.load(open(f'{datapath}{dataset}_finalhalosdata.pkl', 'rb'))
+#         sm_trainloader = DataLoader_notgeom(sm_traindata, batch_size=256, shuffle=True, num_workers=2)
+#         sm_testloader = DataLoader_notgeom(sm_testdata, batch_size=256, shuffle=True, num_workers=2)
+#         in_channels = len(next(iter(sm_traindata))[0])
+#         out_channels = len(next(iter(sm_traindata))[1])
+#         sm_model = models.SimpleNet(100, in_channels, out_channels)
+#         simple_train(sm_model, sm_trainloader, n_epochs = 100, loss_fn = nn.MSELoss())
+#         torch.save(sm_model.state_dict(), f'{taskdir}/model_justfinalhalos.pt')
+
+#     # Test
+#     sm_model = models.SimpleNet(100, in_channels, out_channels)
+#     sm_model.load_state_dict(torch.load(f'{taskdir}/model_justfinalhalos.pt'))
+#     sm_testys, sm_testpreds = simple_test(sm_model, sm_testloader)
+#     sm_metrics = {'sigma': np.std(sm_testpreds - sm_testys, axis=0),
+#                 'R': np.array([stats.pearsonr(sm_testys[:,i], sm_testpreds[:,i]).statistic for i in range(sm_testys.shape[1])])}
+#     pickle.dump((sm_testys, sm_testpreds, sm_metrics), open(f'{taskdir}/model_justfinalhalos_testres.pkl', 'wb'))
+
+# # Train simple model
+# def simple_train(model, trainloader, n_epochs, loss_fn):
+  
+#   optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+#   model.train()
+#   for e in range(n_epochs):
+#     tot_loss = 0
+#     for x, y in trainloader:
+#       optimizer.zero_grad()
+#       yhat = model(x)
+#       loss = loss_fn(yhat, y)
+#       loss.backward()
+#       optimizer.step()
+#       tot_loss += loss.item()
+
+#     print(f'[Epoch {e + 1}] avg loss: {np.round(tot_loss/len(trainloader),5)}')
+
+# # Test simple model
+# def simple_test(model, testloader):
+
+#     model.eval()
+#     with torch.no_grad():
+#         preds = []
+#         ys = []
+#         for x, y in testloader:
+#             yhat = model(x)
+#             preds.append(yhat)
+#             ys.append(y)
+#         preds = torch.cat(preds, dim=0)
+#         ys = torch.cat(ys, dim=0)
+#         preds = preds.detach().numpy()
+#         ys = ys.detach().numpy()
+    
+#     return ys, preds
 
 # # Test simple model
 # def simple_test(model, testloader, predict_mu_sig=False):
