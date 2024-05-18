@@ -1,18 +1,23 @@
-from tkinter import font
-from tkinter.ttk import LabeledScale
-from attr import s
+
 import matplotlib.pyplot as plt
 import numpy as np
 import matplotlib as mpl
 import scipy.stats as stats
 import pickle, json
-import os.path as osp
-from sklearn.semi_supervised import LabelSpreading
-from sympy import Predicate
-from matplotlib import cm
 import networkx as nx
 from itertools import count
+import torch
 import torch_geometric as tg
+from torch_geometric.data import Data
+import os, sys
+import pandas as pd
+try: 
+    from dev import data_utils
+except:
+    sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
+    from ObservablesFromTrees.dev import data_utils
+
+
 
 def multi_base(ys, pred, targets):
     ''' 
@@ -424,7 +429,7 @@ def plot_phot_errby_merghist(ys, preds, test_MHmetrics):
 ###########
 
 
-def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False):
+def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False, colorbymass=True, node_ids='None'):
 
     ####
     # Is k mass? That would seem like a good chance to color nodes by, and its what he has is colorbar titled
@@ -445,30 +450,40 @@ def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False):
     hpos = hierarchy_pos(G.reverse())
     for p in hpos.keys():
         hpos[p] = [hpos[p][0]*1.05, -posy[p]]
-    
-    di = nx.betweenness_centrality(G)
-    featr = []
-    for q, key in enumerate(di.keys()):
-        feat = x[q][masscol] #feat = transformer[tkeys[k]].inverse_transform(graph.x.numpy()[q,k].reshape(-1, 1))[0][0]
-        featr.append(feat)
-        di[key] = feat
-    nx.set_node_attributes(G, di, 'Mvir') # just a typo that he was calling this n_prog??
-    labels = nx.get_node_attributes(G, 'Mvir') # dict of  "index: value" pairs 
-    masses = set(labels.values()) # just a typo that he was calling this progs??
-
-    mapping = dict(zip(sorted(masses),count())) # should be dict of   # sorted() sorts by first value (scale)
     nodes = G.nodes()
-
-    #colors = [G.nodes[n]['Mvir'] for n in nodes] 
-    colors = [mapping[G.nodes[n]['Mvir']] for n in nodes]
+    
+    if colorbymass:
+        di = nx.betweenness_centrality(G)
+        featr = []
+        for q, key in enumerate(di.keys()):
+            feat = x[q][masscol] #feat = transformer[tkeys[k]].inverse_transform(graph.x.numpy()[q,k].reshape(-1, 1))[0][0]
+            featr.append(feat)
+            di[key] = feat
+        nx.set_node_attributes(G, di, 'Mvir') # just a typo that he was calling this n_prog??
+        labels = nx.get_node_attributes(G, 'Mvir') # dict of  "index: value" pairs 
+        masses = set(labels.values()) # just a typo that he was calling this progs??
+        node_size = (x[:,masscol]-min(x[:,3])+1) # **1.2
+        mapping = dict(zip(sorted(masses),count())) # should be dict of   # sorted() sorts by first value (scale)
+        #colors = [G.nodes[n]['Mvir'] for n in nodes] 
+        colors = [mapping[G.nodes[n]['Mvir']] for n in nodes]
+    elif not isinstance(node_ids, str): 
+        colors = ['w' for n in nodes]
+    else:
+        colors = ['b' for n in nodes]
 
     # label_zpos = np.unique(1/x[:,scalecol] - 1) #  scale = 1/(1+z)    # np.unique(1/transformer[0].inverse_transform(feats[:,0].reshape(-1,1))-1)
     label_ypos = np.linspace(0, -100, 20)
     labels = np.round(0.11*label_ypos + 11) # 0.11*label_ypos - 11, 1)
-    rs = np.round(np.percentile(featr, np.linspace(0,100,8)),1)
     ec = nx.draw_networkx_edges(G, hpos, alpha=0.9, width=0.5, arrows=False, ax=ax)
-    node_size = (x[:,masscol]-min(x[:,3])+1) # **1.2
-    nc = nx.draw_networkx_nodes(G, hpos, nodelist=nodes, node_color=colors, node_size=(node_size), cmap=plt.cm.jet, ax=ax)
+
+    if not isinstance(node_ids, str):
+        node_ids = pd.Series([id[:-3] for id in node_ids])
+        nc = nx.draw_networkx_nodes(G, hpos, nodelist=nodes, node_color=colors, node_size=30, ax=ax)
+        nx.draw_networkx_labels(G, hpos, labels=node_ids, font_size=8, ax=ax)
+    elif colorbymass:
+        nc = nx.draw_networkx_nodes(G, hpos, nodelist=nodes, node_color=colors, node_size=(node_size), cmap=plt.cm.jet, ax=ax)
+    else:
+        nc = nx.draw_networkx_nodes(G, hpos, nodelist=nodes, node_color=colors, node_size=30, ax=ax)
 
     if first:
         ax.tick_params(left=True, bottom=False, labelleft=True, labelbottom=True)
@@ -477,10 +492,33 @@ def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False):
         ax.set(ylabel='Redshift')
     if last:
         if not first: ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=True)
-        cbar = fig.colorbar(nc, shrink=0.5, ax=ax)
-        cbar.ax.set_yticklabels(rs)
-        cbar.set_label(r'Halo mass [log($M_h/M_{\odot}$)]') # cbar.set_label('Redshift')
+        if isinstance(node_ids, str) and colorbymass:
+            rs = np.round(np.percentile(featr, np.linspace(0,100,8)),1)
+            cbar = fig.colorbar(nc, shrink=0.5, ax=ax)
+            cbar.ax.set_yticklabels(rs)
+            cbar.set_label(r'Halo mass [log($M_h/M_{\odot}$)]') # cbar.set_label('Redshift')
     ax.set_xticks([])
+
+    return fig
+
+
+def plot_trees_compare(tree_list, labels_list, featnames=['#scale(0)','desc_scale(2)','num_prog(4)','Mvir(10)']):
+
+    fig, axs = plt.subplots(1, len(tree_list), figsize=(len(tree_list)*7, 7), layout='constrained', sharey=True)
+
+
+    for i in range(len(tree_list)): 
+        axs[i].set_title(labels_list[i])
+        tree = tree_list[i]
+        if len(tree) > 12000: 
+            axs[i].text(0.2,0.5, f"Too many halos for efficient plotting ({len(tree)})", transform=axs[i].transAxes)
+            continue
+        data = np.array(tree[featnames], dtype=float)
+        X = torch.tensor(data, dtype=torch.float) 
+        y = torch.tensor(np.nan, dtype=torch.float) 
+        edge_index, edge_attr = data_utils.make_edges(tree)
+        graph = Data(x=X, edge_index=edge_index, edge_attr=edge_attr, y=y)
+        fig = plot_tree(graph, scalecol=0, masscol=3, fig=fig, ax=axs[i], first=True)
 
     return fig
 
@@ -638,9 +676,10 @@ def plot_tree_OLD(graph, scalecol, masscol, fig, ax, first=False, last=False):
     label_ypos = np.linspace(0, -100, 20)
     labels = np.round(0.11*label_ypos + 11) # 0.11*label_ypos - 11, 1)
     rs = np.round(np.percentile(featr, np.linspace(0,100,8)),1)
-    ec = nx.draw_networkx_edges(G, hpos, alpha=0.9, width=0.5, arrows=False, ax=ax)
+    #ec = nx.draw_networkx_edges(G, hpos, alpha=0.9, width=0.5, arrows=False, ax=ax)
     node_size = (x[:,masscol]-min(x[:,3])+1) # **1.2
     nc = nx.draw_networkx_nodes(G, hpos, nodelist=nodes, node_color=colors, node_size=(node_size), cmap=plt.cm.jet, ax=ax)
+
     if first:
         ax.tick_params(left=True, bottom=False, labelleft=True, labelbottom=True)
         ax.set(yticks = label_ypos) #ax.set(yticks=-np.linspace(0, max(zs), 100)[1::6]) #ax.set(yticks=-np.arange(len(zs))[1::6])

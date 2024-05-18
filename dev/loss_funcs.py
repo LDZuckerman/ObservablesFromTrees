@@ -22,7 +22,7 @@ def SmoothL1():
 ##########################################
 
 def GaussNd(pred, ys, var):
-    '''General uncorrelated gaussian, if you're having trouble you can try adding a small number to your sigmas'''
+    '''General uncorrelated gaussian'''
     z = (pred-ys)/var 
     sigloss = sum(log(var))
     err_loss = sum((square(z)))/2 

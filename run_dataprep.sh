@@ -3,9 +3,11 @@
 #SBATCH -J D%j                    # aka "job-name" (%j gives job id)
 #SBATCH -p cca                    # aka "partition": "cca" instead of "cpu" allows you to use up to 40 nodes
 #SBATCH -t 84:59:00               # aka "time": maximum time for run hh:mm:ss
-#SBATCH -N 1                      # aka "nodes": number of nodes to request # DOES MULTITHREADING ALLOW ENOUGH SPEED UP THAT I CAN I FINALLY CHANGE THIS TO 1 (FOR BETTER OUTPUT)
-#SBATCH --mem-per-cpu=12G         # memory per cpu-core (4G per cpu-core is default) 
-#SBATCH --output=SlurmOut/D%j.out # path relative to WORKING directory, NOT directory of this file
+#SBATCH -N 1                      # aka "nodes": number of nodes to request # NO NEED TO HAVE THIS GREATER THAN 1, RIGHT?
+#SBATCH --mem-per-cpu=15G         # memory per cpu-core (4G per cpu-core is default) 
+#SBATCH --output=SlurmOut/D%j.out # path relative to WORKING directory
+
+##SBATCH --ntasks-per-node=10     # this will literally run the srun command 10 times!!! CANNOT USE THIS - GIVES ERROR BECASUE TRIES TO CREAT OUT DIR MULTIPLE TIMES! # Do I need this with multithreading? E.g. should this be 10 when I set n_thread = 10?
 
 module purge
 module load python

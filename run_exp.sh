@@ -6,7 +6,7 @@
 #SBATCH -C v100                   # aka "constraint": use nodes with only listed feature (I think this is the only type on Popeye though?)
 #SBATCH -N 1                      # aka "nodes": number of nodes to request
 #SBATCH --gpus=4                  # total GPUs to request 
-#SBATCH --mem=160G                # total memory to request (will this resolve the out-of-memory error?) [putting this in in place of #SBATCH --mem-per-cpu=24G     # memory per cpu-core (4G per cpu-core is default)]
+#SBATCH --mem=160G                # total memory to request (will 160G resolve the out-of-memory error?) [putting this in in place of #SBATCH --mem-per-cpu=24G     # memory per cpu-core (4G per cpu-core is default)]
 #SBATCH --output=SlurmOut/E%j.out # path relative to WORKING directory, NOT directory of this file
 
 ### Not sure how to use these correctly ###
@@ -14,7 +14,7 @@
 ##SBATCH --cpus-per-task=4        # cpu-cores per task (>1 if multi-threaded) [MAKES 4 OUT FILES]
 ##SBATCH --gres=gpu:1             # number of gpus per node [FAILS]
 
-module purge
+#module purge
 module load python
 module load gcc
 module load cuda
@@ -31,7 +31,11 @@ done
 
 redo='True'
 
-srun python ObservablesFromTrees/run_experiment.py  -gpu 1 -f $expfile -redo $redo # -jobname $SLURM_JOB_ID Really shouldn't pass job id to the script, but it's a quick fix for now.
+echo "Running experiment with expfile: $expfile"
+
+srun python ObservablesFromTrees/run_experiment_dummy.py 
+
+#srun python ObservablesFromTrees/run_experiment.py  -gpu 1 -f $expfile -redo $redo  # -jobname $SLURM_JOB_ID Really shouldn't pass job id to the script, but it's a quick fix for now.
 
 
 ####
