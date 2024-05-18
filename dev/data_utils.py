@@ -37,7 +37,7 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
     tree_path = osp.expanduser(ctrees_path)
     #loadcols = [allnames.index(name) for name in allnames if name not in ignorenames] # col idxs to load (remove ignorenames)
     print(f'\tTree features to include: {featnames}', flush=True)
- 
+    
     # Initialize meta dict
     meta = {'Mlim': str(Mlim), 'sizelim': str(sizelim), 'zcut': str(zcut), 
             'downsize method': downsize_method,
@@ -45,7 +45,6 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
             'lognames': ['Mvir(10)', 'Mvir_all', 'M200b', 'M200c', 'M2500c', 'M_pe_Behroozi', 'M_pe_Diemer'], 
             'minmaxnames': ['Jx(23)', 'Jy(24)', 'Jz(25)'],
             'featnames': featnames, #if not add_gain else featnames + ['gainPct'] # Add 'gainPct' to feat names if adding that
-            'start stamp': str(datetime.now())}
     
     # Load files
     t0_all = time.time()
@@ -159,7 +158,7 @@ def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, 
                 continue
             # print(f'\t\t\tProcessing haloset {i} into tree', flush=True)
             tcount += 1
-            # Remove "unimportant" subhalos and add newdesc_id with updated descendents
+            # Remove "unimportant" subhalos and add newdesc_id with updated descendent
             print(f"\t{proc_name} Downsizeing tree {i} from file {treefile}", flush=True)
             if downsize_method in [4,7]: 
                 dtree, somemasskept = downsize_func(tree, min_pctGain, num=i)
@@ -181,7 +180,7 @@ def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, 
     set_meta['total time'] = np.round(time.time() - t0, 4)
     print(f"\t{proc_name} Done with all files. Took {np.round(time.time() - t0, 4)} s to save {set_meta['tot trees saved']} total trees", flush=True)
     
-    if proc_id == '': # If this is a thread, save set results. If not, just return them. 
+    if proc_id != '': # If this is a thread, save set results. If not, just return them. 
         
         print(f'\t{proc_name} Saving trees in {savefile_set} and saving processing meta to {metafile_set}', flush=True) 
         pickle.dump(all_trees_set, open(savefile_set, 'wb'))
@@ -190,7 +189,6 @@ def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, 
         return [proc_id, set_meta]
     
     else:
-
         return all_trees_set, set_meta
 
 def collect_proc_outputs(procs_outdir, task=''):
@@ -365,7 +363,7 @@ def make_graphs(alltrees, allobs, featnames, metafile, savefile, multi=False):
 
     f.close()
     # if multi: os.rmtree(procs_outdir) # remove temp files
-
+            
     return dat
 
 def process_graphs(alltrees_set, allobs, featnames, save_path, proc_id=''):
@@ -436,6 +434,20 @@ def make_edges(tree):
 
 def response(result):
     result.append(result)
+
+def make_edges(tree):
+
+    progs = []; descs = []
+    for i in range(len(tree)):
+        halo = tree.iloc[i]
+        try: desc_id = halo['newdesc_id'] 
+        except KeyError: desc_id = halo['olddesc_id'] # forgot to rename desc_id to newdesc_id in prep_trees, and then acidentally did keep the rename to olddesc_id
+        if (desc_id != '-1'): 
+            desc_pos = np.where(tree['id(1)']==desc_id)[0][0] 
+            progs.append(i)
+            descs.append(desc_pos) 
+
+    return progs, descs
 
  # Collect other targets for the same galaxies as in the photometry
 def collect_othertargs(obscat_path, alltrees, volname, save_path, reslim=100):
@@ -755,7 +767,6 @@ def downsize_tree3(tree, num, add_gain=False, debug=False):
     #print(f"{len(halmix)})", flush=True) 
 
     return tree_out
-
 
 def downsize_tree4(tree, num, min_gainPct = 10, debug=False):
     '''

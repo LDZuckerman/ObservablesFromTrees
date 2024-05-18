@@ -9,6 +9,7 @@
 
 ##SBATCH --ntasks-per-node=10     # this will literally run the srun command 10 times!!! CANNOT USE THIS - GIVES ERROR BECASUE TRIES TO CREAT OUT DIR MULTIPLE TIMES! # Do I need this with multithreading? E.g. should this be 10 when I set n_thread = 10?
 
+
 module purge
 module load python
 module load gcc
@@ -18,6 +19,7 @@ sizelim='None'
 reslim=100
 
 while getopts "n:v:s:r:d:m:" flag; do
+
  case $flag in
    n) DS_name=$OPTARG;;
    v) tng_vol=$OPTARG;;
@@ -29,6 +31,7 @@ while getopts "n:v:s:r:d:m:" flag; do
 done
 
 srun python ObservablesFromTrees/run_dataprep.py -DS_name $DS_name -tng_vol $tng_vol -sizelim $sizelim -reslim $reslim -downsize_method $downsize_method -multi $multi
+
 
 ####
 # In parent directory of ObservablesFromTrees, run 'sbatch ObservablesFromTrees/run_dataprep.sh -n DS2 -v 100 -s None -r 100 -d 4 -m True'
