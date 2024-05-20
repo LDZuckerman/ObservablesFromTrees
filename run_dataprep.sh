@@ -18,19 +18,19 @@ source ~/VENVS/torch_env2/bin/activate
 sizelim='None'
 reslim=100
 
-while getopts "n:v:s:r:d:m:" flag; do
+while getopts "n:v:s:r:d:m:p:" flag; do
 
  case $flag in
    n) DS_name=$OPTARG;;
    v) tng_vol=$OPTARG;;
    s) sizelim=$OPTARG;;
-   r) reslim=$OPTARG;;
    d) downsize_method=$OPTARG;; 
    m) multi=$OPTARG;;
+   p) prep_props=$OPTARG;;
  esac
 done
 
-srun python ObservablesFromTrees/run_dataprep.py -DS_name $DS_name -tng_vol $tng_vol -sizelim $sizelim -reslim $reslim -downsize_method $downsize_method -multi $multi
+srun python ObservablesFromTrees/run_dataprep.py -DS_name $DS_name -tng_vol $tng_vol -sizelim $sizelim -downsize_method $downsize_method -multi $multi -prep_props $prep_props
 
 
 ####

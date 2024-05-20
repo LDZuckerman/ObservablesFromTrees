@@ -36,7 +36,7 @@ outpath = osp.expanduser(f'{outdir}{args.DS_name}')
 metafile = osp.expanduser(f'{outpath}_meta.json') 
 photfile = osp.expanduser(f'{outpath}_allphot.pkl') # rename from allobs to allphot for clarity
 treefile = osp.expanduser(f'{outpath}_alltrees.pkl')
-graphfile = osp.expanduser(f'{outpath}m.pkl') # REMOVE m AFTER RUN DS2b AGAIN WITH MULTITHREADED MAKE GRAPHS!!!
+graphfile = osp.expanduser(f'{outpath}.pkl') 
 volnames = {'100':'L75n1820TNG', '300':'L205n2500TNG', '50':'L35n2160TNG'}
 ctrees_path = f'/mnt/sdceph/users/sgenel/IllustrisTNG/{volnames[args.tng_vol]}_DM/postprocessing/trees/consistent-trees/'
 obscat_path = f'/mnt/sdceph/users/sgenel/Illustris_IllustrisTNG_public_data_release/{volnames[args.tng_vol]}/output/'
@@ -74,12 +74,15 @@ else:
     print(f'Tree data already exists in {treefile}', flush=True)
 
 # Prepare and save graphs
-print(f'Preparing graphs, will save to {graphfile}', flush=True)
-print(f'\tLoading phot data from {photfile}', flush=True)
-allobs = pickle.load(open(photfile, 'rb'))
-print(f'\tLoading tree data from {treefile}', flush=True)
-alltrees = pickle.load(open(treefile, 'rb'))
-data_utils.make_graphs(alltrees, allobs, featnames, metafile, savefile=graphfile, multi=bool(args.multi)) # transformer = skp.QuantileTransformer(n_quantiles=10, random_state=0)
+if not osp.exists(graphfile):
+    print(f'Preparing graphs, will save to {graphfile}', flush=True)
+    print(f'\tLoading phot data from {photfile}', flush=True)
+    allobs = pickle.load(open(photfile, 'rb'))
+    print(f'\tLoading tree data from {treefile}', flush=True)
+    alltrees = pickle.load(open(treefile, 'rb'))
+    data_utils.make_graphs(alltrees, allobs, featnames, metafile, savefile=graphfile, multi=bool(args.multi)) # transformer = skp.QuantileTransformer(n_quantiles=10, random_state=0)
+else:
+    print(f'Full data products with phot already exist in {graphfile}', flush=True)
 
 ######################################
 # If want to prep props graphs as well
@@ -102,4 +105,4 @@ if bool(args.prep_props):
     allprops = pickle.load(open(propsfile, 'rb'))
     print(f'\tLoading tree data from {treefile}', flush=True)
     alltrees = pickle.load(open(treefile, 'rb'))
-    data_utils.make_graphs(alltrees, allprops, featnames, metafile, save_path=graphfile_props, multi=bool(args.multi)) # transformer = skp.QuantileTransformer(n_quantiles=10, random_state=0)
+    data_utils.make_graphs(alltrees, allprops, featnames, metafile, savefile=graphfile_props, multi=bool(args.multi)) # transformer = skp.QuantileTransformer(n_quantiles=10, random_state=0)

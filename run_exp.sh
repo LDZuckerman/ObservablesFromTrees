@@ -33,9 +33,7 @@ redo='True'
 
 echo "Running experiment with expfile: $expfile"
 
-srun python ObservablesFromTrees/run_experiment_dummy.py 
-
-#srun python ObservablesFromTrees/run_experiment.py  -gpu 1 -f $expfile -redo $redo  # -jobname $SLURM_JOB_ID Really shouldn't pass job id to the script, but it's a quick fix for now.
+srun python ObservablesFromTrees/run_experiment.py  -gpu 1 -f $expfile -redo $redo  # -jobname $SLURM_JOB_ID Really shouldn't pass job id to the script, but it's a quick fix for now.
 
 
 ####

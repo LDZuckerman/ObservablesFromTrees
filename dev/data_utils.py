@@ -1,8 +1,5 @@
-from calendar import firstweekday
-from curses.ascii import RS
-import pickle, time, os, sys
-from anyio import start_blocking_portal
-from flask import g
+
+import pickle, json, time, os, sys
 import numpy as np
 import os.path as osp
 from datetime import date, datetime
@@ -14,12 +11,10 @@ from torch_geometric.data import Data
 from torch.utils.data import Dataset as Dataset_notgeom
 import networkx as nx
 from collections import defaultdict
+import h5py
 
 import illustris_python as il
 import pandas as pd
-import h5py
-import json
-import io
 from sklearn.model_selection import train_test_split
 import scipy.stats as stats
 import sklearn.metrics as skmetrics
@@ -44,7 +39,7 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
             'pct gain to include': pct_gain_include,
             'lognames': ['Mvir(10)', 'Mvir_all', 'M200b', 'M200c', 'M2500c', 'M_pe_Behroozi', 'M_pe_Diemer'], 
             'minmaxnames': ['Jx(23)', 'Jy(24)', 'Jz(25)'],
-            'featnames': featnames, #if not add_gain else featnames + ['gainPct'] # Add 'gainPct' to feat names if adding that
+            'featnames': featnames}  #if not add_gain else featnames + ['gainPct'] # Add 'gainPct' to feat names if adding that
     
     # Load files
     t0_all = time.time()
@@ -75,8 +70,7 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
         if len(os.listdir(procs_outdir)) == 0: 
             raise ValueError('All procs finished but no files saved in procs_outdir')
         all_trees, processing_meta = collect_proc_outputs(procs_outdir, task='trees') 
-
-        
+ 
     # Save full alltrees
     pickle.dump(all_trees, open(savefile, 'wb')) # savefile = name of file containing collected trees from all file sets
     with open(metafile, 'r+') as f: 
@@ -88,7 +82,7 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
     meta['Total time'] = np.round(time.time() - t0_all, 4)
     if f'tree meta' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: # If obs_type meta already exists (this is a re-do), remove old obs_type meta
         rem_idx = np.where(np.array([list(listmeta[i].keys())[0] for i in range(len(listmeta))]) == f'tree meta')[0][0]
-        listmeta = listmeta.pop(rem_idx) 
+        listmeta.pop(rem_idx) 
     listmeta.append({'tree meta':meta})  
     with open(metafile, 'w') as f:
         json.dump(listmeta, f)
@@ -214,13 +208,13 @@ def collect_proc_outputs(procs_outdir, task=''):
     # Add up total counts and store in meta 
     set_metafiles = [file for file in os.listdir(procs_outdir) if file.endswith(f'{task}meta.json')]
     for f in set_metafiles:
-        set_meta = pickle.load(open(f, 'rb'))
+        set_meta = pickle.load(open(procs_outdir+f, 'rb'))
         for key in processing_meta.keys():
             processing_meta[key] += set_meta[key]
 
     return all, processing_meta
 
-# Make dictionary of (subhalo, phot) for all central subhalos
+# Make dictionary of (subhalo, obs) for all central subhalos
 def prep_obs(obscat_path, crossmatchRSSF_path, rstar_path, metafile, savefile, reslim=100, obs_type='phot'):
     '''
     PROBABLY SHOULD UPDATE THIS DO STORE BOTH PHOT AND PROPS AT THE SAME TIME NEXT TIME I RUN A NEW DS
@@ -237,7 +231,7 @@ def prep_obs(obscat_path, crossmatchRSSF_path, rstar_path, metafile, savefile, r
         label_names = ['SubhaloBHMass', 'SubhaloBHMdot','SubhaloGasMetallicity','SubhaloHalfmassRad','SubhaloMass','SubhaloGasMass','SubhaloStelMass','SubhaloSFR','SubhaloStarMetallicity','SubhaloVelDisp','SubhaloVmax','SubhaloRes']
         to_store = label_names
 
-    meta = {'label_names': label_names, 'reslim': reslim, # Note: had a typo swapping V and B, but I've fixed that
+    meta = {'label_names': label_names, 'reslim': reslim, 
             'tot galaxies': 0, 'tot galaxies saved': 0, 
             'galaxies res cut': 0, 'galaxies sat cut': 0, 
             'start stamp': str(datetime.now())}
@@ -253,7 +247,7 @@ def prep_obs(obscat_path, crossmatchRSSF_path, rstar_path, metafile, savefile, r
         listmeta = json.load(f) 
     if f'{obs_type} meta' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: #list(listmeta[-1].keys())[0] == f'{obs_type} meta': # If obs_type meta already exists (this is a re-do), remove old obs_type meta
         rem_idx = np.where(np.array([list(listmeta[i].keys())[0] for i in range(len(listmeta))]) == f'{obs_type} meta')[0][0]
-        listmeta = listmeta.pop(rem_idx) #listmeta[:-1]
+        listmeta.pop(rem_idx) #listmeta[:-1]
     listmeta.append({f'{obs_type} meta': meta}) 
     with open(metafile, 'w') as f:
         json.dump(listmeta, f)
@@ -297,7 +291,6 @@ def collect_targs(to_store, crossmatchRSSF_path, rstar_path, obscat_path, reslim
             if meta!= None: meta['tot galaxies saved'] += 1
         else:
             info = []
-            info.append(str(int(rstar_id)))
             for targ in to_store:
                 if targ == 'SubhaloRes': info.append(sh_res[idx])
                 elif targ == 'SubhaloGasMass': info.append(subhalos['SubhaloMassType'][idx,0]) # WAS [IDX][O] BUT I DONT THINK THAT SHOULD BE THE PROBLEM
@@ -336,7 +329,7 @@ def make_graphs(alltrees, allobs, featnames, metafile, savefile, multi=False):
             treeset = {k: alltrees[k] for k in keys}
             args = (treeset, allobs, featnames, procs_outdir, i)
             result = pool.apply_async(process_graphs, args=args)#), callback=response)
-            results.append(result.get())
+            #results.append(result.get())
         pool.close()
         pool.join()
         for res in results:
@@ -356,11 +349,10 @@ def make_graphs(alltrees, allobs, featnames, metafile, savefile, multi=False):
     tag = '' if 'props' not in savefile else ' props'
     if f'graph meta{tag}' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: # If obs_type meta already exists (this is a re-do), remove old obs_type meta
         rem_idx = np.where(np.array([list(listmeta[i].keys())[0] for i in range(len(listmeta))]) == f'graph meta')[0][0]
-        listmeta = listmeta.pop(rem_idx) #listmeta[:-1]
+        listmeta.pop(rem_idx) #listmeta[:-1]
     listmeta.append({f'graph{tag} meta':meta}) 
     with open(metafile, 'w') as f:
         json.dump(listmeta, f)
-
     f.close()
     # if multi: os.rmtree(procs_outdir) # remove temp files
             
@@ -1314,11 +1306,36 @@ def check_tree(tree, num, print_good=False):
     if print_good: print('Downsized tree passed all tests')
 
 
-###################
+####################
 # Debuging functions
-###################
+####################
+
+def combine_mstar_mhaloz0(dataset):
+    '''
+    For DS2, for which I made allprops analogous to allobs
+    Output is same as props graphs, except just mhalozo not tree
+    '''
+
+    alltrees = pickle.load(open(osp.expanduser(dataset.replace('.pkl','_alltrees.pkl')), 'rb'))
+    allprops = pickle.load(open(osp.expanduser(dataset.replace('.pkl','_allprops.pkl')), 'rb'))
+    prop_label_names = ['SubhaloBHMass', 'SubhaloBHMdot','SubhaloGasMetallicity','SubhaloHalfmassRad','SubhaloMass','SubhaloGasMass','SubhaloStelMass','SubhaloSFR','SubhaloStarMetallicity','SubhaloVelDisp','SubhaloVmax','SubhaloRes'] # Why is props meta and phot meta not saved seperately in meta??? instead its still just obs meta which is phot meta
+    mstar_idx = prop_label_names.index('SubhaloStelMass')
+
+    mass_info = pd.DataFrame(columns=['rstar_id', 'mstar', 'mhaloz0'])
+    for id in alltrees.keys():
+        mhaloz0 = alltrees[id].loc[0]['Mvir(10)']
+        mstar = allprops[id][mstar_idx]
+        mass_info.loc[len(mass_info)] = {'rstar_id': id, 'mstar': mstar, 'mhaloz0': mhaloz0}
+
+    pickle.dump(mass_info, open(dataset.replace('.pkl','_mass_info.pkl'), 'wb'))
+
+    return mass_info
+
 
 def prep_mstar(obscat_path, volname, save_path):
+    '''
+    For DS1, for which I didnt make allprops analogous to allobs
+    '''
     
     # Load files for crossmatching to rstar IDs
     crossmatchRSSF_path = f'/mnt/sdceph/users/sgenel/IllustrisTNG/{volname}_DM/postprocessing/trees/rockstar/matches/rockstar_subhalo_matching_to_FP.hdf5'
@@ -1345,6 +1362,9 @@ def prep_mstar(obscat_path, volname, save_path):
         pickle.dump(all_mstar, f) 
 
 def prep_mhaloz0(ctrees_path, mstar_ids, save_path):
+    '''
+    For DS1, for which I didnt make allprops analogous to allobs
+    '''
 
     # Load ctrees data (just one file)
     all_names = ['#scale(0)', 'id(1)', 'desc_scale(2)', 'desc_id(3)', 'num_prog(4)', 'pid(5)', 'upid(6)', 'desc_pid(7)', 'phantom(8)', 'sam_Mvir(9)', 'Mvir(10)', 'Rvir(11)', 'rs(12)', 'vrms(13)', 'mmp?(14)', 'scale_of_last_MM(15)', 'vmax(16)', 'x(17)', 'y(18)', 'z(19)', 'vx(20)', 'vy(21)', 'vz(22)', 'Jx(23)', 'Jy(24)', 'Jz(25)', 'Spin(26)', 'Breadth_first_ID(27)', 'Depth_first_ID(28)', 'Tree_root_ID(29)', 'Orig_halo_ID(30)', 'Snap_idx(31)', 'Next_coprogenitor_depthfirst_ID(32)', 'Last_progenitor_depthfirst_ID(33)', 'Last_mainleaf_depthfirst_ID(34)', 'Tidal_Force(35)', 'Tidal_ID(36)', 'Rs_Klypin', 'Mvir_all', 'M200b', 'M200c', 'M500c', 'M2500c', 'Xoff', 'Voff', 'Spin_Bullock', 'b_to_a', 'c_to_a', 'A[x]', 'A[y]', 'A[z]', 'b_to_a(500c)', 'c_to_a(500c)', 'A[x](500c)', 'A[y](500c)', 'A[z](500c)', 'T/|U|', 'M_pe_Behroozi', 'M_pe_Diemer', 'Halfmass_Radius']

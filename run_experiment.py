@@ -19,7 +19,7 @@ args = parser.parse_args()
 # Load construction dictionary from exp json file
 exp_file = osp.expanduser(args.f) # osp.join(osp.abspath(''), args.f)
 dict = json.load(open(exp_file))
-print(f"Experiment parameters: \n{d}\n")
+print(f"Experiment parameters: \n{dict}\n")
 print(f'\nSETTING UP EXPERIMENT\n') # print(f'\nParameters are the following -> \n{d}')
 
 # Set up output and copy experiment json file to output dir 
