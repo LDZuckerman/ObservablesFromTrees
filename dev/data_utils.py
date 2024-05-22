@@ -26,8 +26,8 @@ except:
     from ObservablesFromTrees.dev import run_utils
 
 # Make dictionary of (cm_ID, tree DF) for all trees
-def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('before', np.inf), Mlim=10, sizelim=np.inf, tinytest=False, downsize_method='', multi=False, pct_gain_include=10): 
-          
+def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('before', np.inf), Mlim=10, sizelim=np.inf, tinytest=False, downsize_method='', multi=False, check_gain_with='prog'): 
+
     # Prepare to load tree data 
     tree_path = osp.expanduser(ctrees_path)
     #loadcols = [allnames.index(name) for name in allnames if name not in ignorenames] # col idxs to load (remove ignorenames)
@@ -36,7 +36,8 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
     # Initialize meta dict
     meta = {'Mlim': str(Mlim), 'sizelim': str(sizelim), 'zcut': str(zcut), 
             'downsize method': downsize_method,
-            'pct gain to include': pct_gain_include,
+            'pct gain to include': 10,
+            'check_gain_with': check_gain_with,
             'lognames': ['Mvir(10)', 'Mvir_all', 'M200b', 'M200c', 'M2500c', 'M_pe_Behroozi', 'M_pe_Diemer'], 
             'minmaxnames': ['Jx(23)', 'Jy(24)', 'Jz(25)'],
             'featnames': featnames}  #if not add_gain else featnames + ['gainPct'] # Add 'gainPct' to feat names if adding that
@@ -49,7 +50,7 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
     # Process trees in each file, breaking files into sets if multithreading
     if downsize_method not in [1, 3, 4, 7, 'None']: raise ValueError(f'Invalid downsize method {downsize_method}')
     if not multi: 
-        all_trees, processing_meta = process_treefiles(treefiles, tree_path, featnames, meta['lognames'], meta['minmaxnames'], zcut, Mlim, sizelim, downsize_method, phot_ids, pct_gain_include, save_path=savefile)
+        all_trees, processing_meta = process_treefiles(treefiles, tree_path, featnames, meta['lognames'], meta['minmaxnames'], zcut, Mlim, sizelim, downsize_method, phot_ids, check_gain_with, save_path=savefile)
     else:    
         procs_outdir = savefile.replace('_alltrees.pkl', '_procs_temp/')
         print(f"Creating temporary output directory {procs_outdir} for each thread to store tree and meta files.")
@@ -60,7 +61,7 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
         pool = mp.Pool(processes=n_threads) 
         results = []
         for i in range(len(filesets)):
-            args = (filesets[i], tree_path, featnames, meta['lognames'], meta['minmaxnames'], zcut, Mlim, sizelim, downsize_method, phot_ids, pct_gain_include, procs_outdir, i)
+            args = (filesets[i], tree_path, featnames, meta['lognames'], meta['minmaxnames'], zcut, Mlim, sizelim, downsize_method, phot_ids, check_gain_with, procs_outdir, i)
             result = pool.apply_async(process_treefiles, args=args)#), callback=response)
             results.append(result.get())
         pool.close()
@@ -80,7 +81,7 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
     meta.update(processing_meta) # add keys and values from processing_meta to meta
     meta['n_threads'] = n_threads if multi else 'NaN'
     meta['Total time'] = np.round(time.time() - t0_all, 4)
-    if f'tree meta' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: # If obs_type meta already exists (this is a re-do), remove old obs_type meta
+    if f'tree meta' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: # If targ_type meta already exists (this is a re-do), remove old targ_type meta
         rem_idx = np.where(np.array([list(listmeta[i].keys())[0] for i in range(len(listmeta))]) == f'tree meta')[0][0]
         listmeta.pop(rem_idx) 
     listmeta.append({'tree meta':meta})  
@@ -89,7 +90,7 @@ def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('befo
     f.close()
     
 
-def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, Mlim, sizelim, downsize_method, phot_ids, min_pctGain, save_path, proc_id=''):
+def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, Mlim, sizelim, downsize_method, phot_ids, check_gain_with, save_path, proc_id=''):
 
     # Create dicts to store trees and meta results from this file set [note that file set is all tree files if not multithreading]
     all_trees_set = {}
@@ -155,7 +156,7 @@ def process_treefiles(fileset, tree_path, featnames, logcols, minmaxcols, zcut, 
             # Remove "unimportant" subhalos and add newdesc_id with updated descendent
             print(f"\t{proc_name} Downsizeing tree {i} from file {treefile}", flush=True)
             if downsize_method in [4,7]: 
-                dtree, somemasskept = downsize_func(tree, min_pctGain, num=i)
+                dtree, somemasskept = downsize_func(tree, check_gain_with, num=i)
                 if somemasskept: set_meta['trees affected by mass keep'] += 1
             elif downsize_method in [1,3]: dtree = downsize_func(tree, num=i)
             elif downsize_method == 'None': 
@@ -215,19 +216,18 @@ def collect_proc_outputs(procs_outdir, task=''):
     return all, processing_meta
 
 # Make dictionary of (subhalo, obs) for all central subhalos
-def prep_obs(obscat_path, crossmatchRSSF_path, rstar_path, metafile, savefile, reslim=100, obs_type='phot'):
+def prep_targs(obscat_path, crossmatchRSSF_path, rstar_path, metafile, savefile, reslim=100, targ_type='phot'):
     '''
     PROBABLY SHOULD UPDATE THIS DO STORE BOTH PHOT AND PROPS AT THE SAME TIME NEXT TIME I RUN A NEW DS
     '''
     # Should I store mstar and res as well? 
     #   Would it make later access easier?
     #   Won't help for looking at other targs, and would still need to re-map to trees, since dont want graphs to include things other)
-    #   And already saved in subfind_othertargs.pkl for res = 100 and ctrl cut, which I will probabaly always want
 
-    if obs_type == 'phot':
+    if targ_type == 'phot':
         label_names = ["U", "B", "V", "K", "g", "r", "i", "z"]
         to_store = 'phot'
-    if obs_type == 'props':
+    if targ_type == 'props':
         label_names = ['SubhaloBHMass', 'SubhaloBHMdot','SubhaloGasMetallicity','SubhaloHalfmassRad','SubhaloMass','SubhaloGasMass','SubhaloStelMass','SubhaloSFR','SubhaloStarMetallicity','SubhaloVelDisp','SubhaloVmax','SubhaloRes']
         to_store = label_names
 
@@ -240,15 +240,15 @@ def prep_obs(obscat_path, crossmatchRSSF_path, rstar_path, metafile, savefile, r
     all_obs, meta = collect_targs(to_store, crossmatchRSSF_path, rstar_path, obscat_path, reslim, meta)
 
     # Save to pickle
-    print(f'\tSaving {obs_type} in {savefile} and meta in {metafile}', flush=True)     
+    print(f'\tSaving {targ_type} in {savefile} and meta in {metafile}', flush=True)     
     with open(savefile, 'wb') as f:
         pickle.dump(all_obs, f)
     with open(metafile, 'r+') as f: 
         listmeta = json.load(f) 
-    if f'{obs_type} meta' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: #list(listmeta[-1].keys())[0] == f'{obs_type} meta': # If obs_type meta already exists (this is a re-do), remove old obs_type meta
-        rem_idx = np.where(np.array([list(listmeta[i].keys())[0] for i in range(len(listmeta))]) == f'{obs_type} meta')[0][0]
+    if f'{targ_type} meta' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: #list(listmeta[-1].keys())[0] == f'{targ_type} meta': # If targ_type meta already exists (this is a re-do), remove old targ_type meta
+        rem_idx = np.where(np.array([list(listmeta[i].keys())[0] for i in range(len(listmeta))]) == f'{targ_type} meta')[0][0]
         listmeta.pop(rem_idx) #listmeta[:-1]
-    listmeta.append({f'{obs_type} meta': meta}) 
+    listmeta.append({f'{targ_type} meta': meta}) 
     with open(metafile, 'w') as f:
         json.dump(listmeta, f)
     f.close()
@@ -347,7 +347,7 @@ def make_graphs(alltrees, allobs, featnames, metafile, savefile, multi=False):
     with open(metafile, 'r+') as f: # with w+ I cant read it but if I write to it with r+ I cant read the new file
         listmeta = json.load(f) 
     tag = '' if 'props' not in savefile else ' props'
-    if f'graph meta{tag}' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: # If obs_type meta already exists (this is a re-do), remove old obs_type meta
+    if f'graph meta{tag}' in [list(listmeta[i].keys())[0] for i in range(len(listmeta))]: # If targ_type meta already exists (this is a re-do), remove old targ_type meta
         rem_idx = np.where(np.array([list(listmeta[i].keys())[0] for i in range(len(listmeta))]) == f'graph meta')[0][0]
         listmeta.pop(rem_idx) #listmeta[:-1]
     listmeta.append({f'graph{tag} meta':meta}) 
@@ -1045,7 +1045,7 @@ def downsize_tree6(intree, num, debug=False):
     return tree_out
 
 
-def downsize_tree7(intree, min_pct_gain=10, num=np.nan, debug=False):
+def downsize_tree7(intree, check_gain_with, num=np.nan, debug=False):
     '''
     Even faster bottom-up downsize, with ability to retain high mass gain halos
     '''
@@ -1063,7 +1063,7 @@ def downsize_tree7(intree, min_pct_gain=10, num=np.nan, debug=False):
     out_hids = []
     new_descids = []
     final_id = tree[tree['desc_id(3)']=='-1']['id(1)'][0]
-    out_hids, new_descids, somemasskept = build_keep_lists_rec_7(did_dict, pid_dict, m_dict, final_id, out_hids, new_descids, min_pct_gain, debug=debug)
+    out_hids, new_descids, somemasskept = build_keep_lists_rec_7(did_dict, pid_dict, m_dict, final_id, out_hids, new_descids, check_gain_with=check_gain_with, debug=debug)
     
     # Create DF - this method is faster than looping through out_hids and appending to a list
     tree_out = tree.copy()
@@ -1080,10 +1080,11 @@ def downsize_tree7(intree, min_pct_gain=10, num=np.nan, debug=False):
     return tree_out, somemasskept
 
 
-def build_keep_lists_rec_7(did_dict, pid_dict, m_dict, start_id, out_hids, new_descids, min_pct_gain, debug=False, somemasskept=False):
+def build_keep_lists_rec_7(did_dict, pid_dict, m_dict, start_id, out_hids, new_descids, check_gain_with, debug=False, somemasskept=False):
 
     halo_id = start_id
     if debug: print(f"Called build_tree_rec with starting halo {halo_id}")
+    min_pct_gain=10
    
     # Add the start halo to out_hids and its desc to new_descids
     desc_id = did_dict[halo_id]
@@ -1091,16 +1092,18 @@ def build_keep_lists_rec_7(did_dict, pid_dict, m_dict, start_id, out_hids, new_d
     out_hids.append(halo_id)
     new_descids.append(desc_id)
     
-    # Find the end of the chain (next halo with more than one prog or no progs)
+    # Find the end of the chain (next halo with more than one prog, or high mass gain)
     jump_id = halo_id  # Set the "jump_id" to the start halo
     prog_ids = pid_dict[halo_id]
-    pct_gain = 10**(m_dict[halo_id] - m_dict[prog_ids[0]]) if len(prog_ids) == 1 else 0 
+    pct_gain = 10**(m_dict[halo_id] - m_dict[prog_ids[0]]) if check_gain_with == 'prog' and len(prog_ids) == 1 else 0 # if checking gain with jump, set to 0 since this first halo is the jump
     while len(prog_ids) == 1 and pct_gain < min_pct_gain: 
         if debug: print(f"    Halo {halo_id} has one prog ({prog_ids[0]}), and small mass gain wrt that prog, so will move up chain to find new prog (unless {prog_ids[0]} is a root)")
         halo_id = prog_ids[0] # only one
         prog_ids = pid_dict[halo_id]
         if len(prog_ids) == 1: 
-            pct_gain = 10**(m_dict[halo_id] - m_dict[prog_ids[0]]) 
+            if check_gain_with == 'prog': pct_gain = 10**(m_dict[halo_id] - m_dict[prog_ids[0]]) 
+            elif check_gain_with == 'jump': pct_gain = 10**(m_dict[jump_id] - m_dict[halo_id]) # switch subtract order since now comparing to later halo (jump)
+            else: raise ValueError(f"check_gain_with must be 'prog' or 'jump' not {check_gain_with}")
             
     # Unless the end of the chain is the starting halo itself (started with a merger or high mass gainer), add it to out_halos and its desc to new_descids
     if halo_id != jump_id:
@@ -1114,7 +1117,7 @@ def build_keep_lists_rec_7(did_dict, pid_dict, m_dict, start_id, out_hids, new_d
         if debug: print(f"  Halo {halo_id} is a {'merger with progs' if len(prog_ids) > 1 else 'high gain with prog'} {prog_ids}")
         for prog_id in prog_ids:
             if debug: print(f" Calling build_tree_rec again with start halo = {prog_id}")
-            build_keep_lists_rec_7(did_dict, pid_dict, m_dict, prog_id, out_hids, new_descids, min_pct_gain, debug, somemasskept)
+            build_keep_lists_rec_7(did_dict, pid_dict, m_dict, prog_id, out_hids, new_descids, check_gain_with, debug, somemasskept)
 
     # If the end of the chain is a root, this branch is finished
     if len(prog_ids) == 0: 
@@ -1310,7 +1313,7 @@ def check_tree(tree, num, print_good=False):
 # Debuging functions
 ####################
 
-def combine_mstar_mhaloz0(dataset):
+def combine_mstar_mhaloz0_mag(dataset):
     '''
     For DS2, for which I made allprops analogous to allobs
     Output is same as props graphs, except just mhalozo not tree
@@ -1318,16 +1321,21 @@ def combine_mstar_mhaloz0(dataset):
 
     alltrees = pickle.load(open(osp.expanduser(dataset.replace('.pkl','_alltrees.pkl')), 'rb'))
     allprops = pickle.load(open(osp.expanduser(dataset.replace('.pkl','_allprops.pkl')), 'rb'))
+    allphot = pickle.load(open(osp.expanduser(dataset.replace('.pkl','_allphot.pkl')), 'rb'))
     prop_label_names = ['SubhaloBHMass', 'SubhaloBHMdot','SubhaloGasMetallicity','SubhaloHalfmassRad','SubhaloMass','SubhaloGasMass','SubhaloStelMass','SubhaloSFR','SubhaloStarMetallicity','SubhaloVelDisp','SubhaloVmax','SubhaloRes'] # Why is props meta and phot meta not saved seperately in meta??? instead its still just obs meta which is phot meta
     mstar_idx = prop_label_names.index('SubhaloStelMass')
 
-    mass_info = pd.DataFrame(columns=['rstar_id', 'mstar', 'mhaloz0'])
+    mass_info = pd.DataFrame(columns=['rstar_id', 'mstar', 'mhaloz0', 'umag', 'vmag'])
     for id in alltrees.keys():
         mhaloz0 = alltrees[id].loc[0]['Mvir(10)']
         mstar = allprops[id][mstar_idx]
-        mass_info.loc[len(mass_info)] = {'rstar_id': id, 'mstar': mstar, 'mhaloz0': mhaloz0}
+        Umag = allphot[id][0]
+        Vmag = allphot[id][2]
+        mass_info.loc[len(mass_info)] = {'rstar_id': id, 'mstar': mstar, 'mhaloz0': mhaloz0, 'umag': Umag, 'vmag': Vmag}
 
-    pickle.dump(mass_info, open(dataset.replace('.pkl','_mass_info.pkl'), 'wb'))
+    pickle.dump(mass_info, open(dataset.replace('.pkl','_mass_imag_nfo.pkl'), 'wb'))
+
+    print("Done")
 
     return mass_info
 
@@ -1422,12 +1430,16 @@ def create_subset(data_params, return_set):
     '''
 
     # Use dataset meta file to see names of all feats and targs in dataset
-    data_path = data_params['data_path']
-    data_file = data_params['data_file']
-    data_meta_file = osp.expanduser(osp.join(data_path, data_file.replace('.pkl', '_meta.json')))
+    data_path = data_params['data_path'] # e.g. ../Data/vol100/
+    datafile = data_params['data_file'] # e.g. DS2_phot_final.pkl
+    dataset = datafile[0:datafile.find('_')] # e.g. DS2
+    targ_type = datafile[datafile.find('_')+1:datafile.find('_fin')] # e.g. phot
+    data_meta_file = osp.expanduser(osp.join(data_path, f'{dataset}_meta.json'))
     data_meta = json.load(open(data_meta_file, 'rb'))
-    all_labelnames = data_meta[1]['obs meta']['label_names'] 
-    all_featnames = data_meta[2]['tree meta']['featnames']
+    targs_idx = np.where(np.array([list(data_meta[i].keys())[0] for i in range(len(data_meta))]) == f'{targ_type} meta')[0][0]
+    all_labelnames = data_meta[targs_idx][f'{targ_type} meta']['label_names'] 
+    tree_idx = np.where(np.array([list(data_meta[i].keys())[0] for i in range(len(data_meta))]) == f'tree meta')[0][0]
+    all_featnames = data_meta[tree_idx]['tree meta']['featnames']
 
     # Load dataset subset parameters 
     use_targidxs = [all_labelnames.index(targ) for targ in data_params['use_targs']] # targets = data_params['targets']
@@ -1436,13 +1448,13 @@ def create_subset(data_params, return_set):
     splits = data_params['splits']
 
     # Load data from pickle
-    print(f'Dataset subset doesnt yet exist. Creating from {data_path}{data_file}', flush=True)
-    data = pickle.load(open(osp.expanduser(f'{data_path}/{data_file}'), 'rb'))
+    print(f'Creating subset from {data_path}/{datafile}', flush=True)
+    data = pickle.load(open(osp.expanduser(f'{data_path}/{datafile}'), 'rb'))
 
     # Split into trainval and test
-    testidx_file = osp.expanduser(f'{data_path}{data_file.replace(".pkl", "")}_testidx{splits[2]}.npy')
+    testidx_file = osp.expanduser(f'{data_path}/{dataset}_testidx{splits[2]}.npy')
     if not os.path.exists(testidx_file): 
-        print(f'   Test indices for {splits[2]}% test set not yet saved for this dataset ({data_file}). Creating and saving in {testidx_file}', flush=True)
+        print(f'   Test indices for {splits[2]}% test set not yet saved for this dataset ({datafile}). Creating and saving in {testidx_file}', flush=True)
         testidx = np.random.choice(np.linspace(0, len(data)-1, len(data), dtype=int), int(len(data)*(splits[2]/100)), replace=False)
         np.save(testidx_file, testidx)
     else: 
@@ -1459,7 +1471,7 @@ def create_subset(data_params, return_set):
     # Fit transformers to all trainval graph data and all test graph data. Note: Use all cols for transform 
     if transfname != "None":
         
-        traintransformer_path = osp.expanduser(f'{data_path}{data_file.replace(".pkl", "_"+transfname+"_train.pkl")}')
+        traintransformer_path = osp.expanduser(f'{data_path}/{dataset}_{transfname}_train.pkl')
         if not os.path.exists(traintransformer_path):
             print(f'   Fitting transformer to train/val data (will save in {traintransformer_path})', flush=True)
             ft_train = run_utils.fit_transformer(trainval_data, all_featnames, save_path=traintransformer_path, transfname=data_params['transf_name']) # maybe should do seperate for train/val too, but as long as not fitting on final test its probabaly ok
@@ -1467,7 +1479,7 @@ def create_subset(data_params, return_set):
             print(f'   Applying transformer to train/val data (loaded from {traintransformer_path})', flush=True)
             ft_train = pickle.load(open(traintransformer_path, 'rb')) 
         
-        testtransformer_path = osp.expanduser(f'{data_path}{data_file.replace(".pkl", "_"+transfname+"_test.pkl")}')
+        testtransformer_path = osp.expanduser(f'{data_path}/{dataset}_{transfname}_test.pkl')
         if not os.path.exists(testtransformer_path):
             print(f'   Fitting transformer to test data (will save in {testtransformer_path})', flush=True)
             ft_test = run_utils.fit_transformer(test_data, all_featnames, save_path=testtransformer_path, transfname=data_params['transf_name']) 
@@ -1501,9 +1513,9 @@ def create_subset(data_params, return_set):
     val_out = trainval_out[int(len(trainval_out)*(val_pct)):]
 
     # Save (seperately for train and test to aviod any mistakes!)
-    tag = f"_{use_featidxs}_{use_targidxs}_{transfname}_{splits}"
-    train_path = osp.expanduser(f'{data_path}{data_file.replace(".pkl", tag)}_train.pkl')
-    test_path = osp.expanduser(f'{data_path}{data_file.replace(".pkl", tag)}_test.pkl')
+    tag = f"{targ_type}_{use_featidxs}_{use_targidxs}_{transfname}_{splits}"
+    train_path = osp.expanduser(f'{data_path}/{dataset}_subsets/{dataset}_{tag}_train.pkl') 
+    test_path = osp.expanduser(f'{data_path}/{dataset}_subsets/{dataset}_{tag}_test.pkl') 
     print(f"   Saving train+val sub-dataset as {train_path}", flush=True)
     print(f"   Saving test sub-dataset as {test_path}", flush=True)
     pickle.dump((train_out, val_out), open(train_path, 'wb'))
@@ -1518,23 +1530,27 @@ def create_subset(data_params, return_set):
 def get_subset_path(data_params, set):
 
     # Get subset parameters
-    data_path = data_params['data_path']
-    data_file = data_params['data_file']
-    data_meta_file = osp.expanduser(osp.join(data_path, data_file.replace('.pkl', '_meta.json')))
+    data_path = data_params['data_path'] # e.g. ../Data/vol100/
+    datafile = data_params['data_file'] # e.g. DS2_phot_final.pkl
+    dataset = datafile[0:datafile.find('_')] # e.g. DS2
+    targ_type = datafile[datafile.find('_')+1:datafile.find('_fin')] # e.g. phot
+    data_meta_file = osp.expanduser(osp.join(data_path, f'{dataset}_meta.json'))
     data_meta = json.load(open(data_meta_file, 'rb'))
-    all_label_names = data_meta[1]['obs meta']['label_names'] 
-    all_featnames = data_meta[2]['tree meta']['featnames']
-    use_targidxs = [all_label_names.index(targ) for targ in data_params['use_targs']] # targets = data_params['targets']
-    use_featidxs = [all_featnames.index(f) for f in all_featnames if f in data_params['use_feats']] #  # have use_feats be names not idxs! in case we want to train on fewer features without recreating dataset
+    targs_idx = np.where(np.array([list(data_meta[i].keys())[0] for i in range(len(data_meta))]) == f'{targ_type} meta')[0][0]
+    all_labelnames = data_meta[targs_idx][f'{targ_type} meta']['label_names'] 
+    tree_idx = np.where(np.array([list(data_meta[i].keys())[0] for i in range(len(data_meta))]) == f'tree meta')[0][0]
+    all_featnames = data_meta[tree_idx]['tree meta']['featnames']
+    use_targidxs = [all_labelnames.index(targ) for targ in data_params['use_targs']] 
+    use_featidxs = [all_featnames.index(f) for f in all_featnames if f in data_params['use_feats']] 
     transfname = data_params['transf_name']
     splits = data_params['splits']
-    tag = f"_{use_featidxs}_{use_targidxs}_{transfname}_{splits}"
+    tag = f"{targ_type}_{use_featidxs}_{use_targidxs}_{transfname}_{splits}"
 
     # Return train or test path
     if set =='test':
-        return osp.expanduser(f'{data_path}{data_file.replace(".pkl", tag)}_test.pkl')  
+        return osp.expanduser(f'{data_path}/{dataset}_subsets/{dataset}_{tag}_test.pkl')  
     else:
-        return osp.expanduser(f'{data_path}{data_file.replace(".pkl", tag)}_train.pkl')  
+        return osp.expanduser(f'{data_path}/{dataset}_subsets/{dataset}_{tag}_train.pkl')  
 
 # debugging helper function
 def load_like_prep(file, featnames = ['#scale(0)', 'desc_scale(2)', 'num_prog(4)', 'Mvir(10)']):

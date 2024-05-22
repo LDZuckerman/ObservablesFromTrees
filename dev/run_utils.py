@@ -11,6 +11,7 @@ import scipy.stats as stats
 from torch.utils.data import DataLoader as DataLoader_notgeom
 from torch_geometric.loader import DataLoader
 from torch import nn
+import sklearn.metrics as skmetrics
 try: 
     from dev import data_utils
 except:
@@ -98,43 +99,38 @@ def get_downsize_func(method_num):
     return function
 
 
-def test(loader, model, n_targ, get_var = False, get_rho = False, return_x = False):
+def test(loader, model, n_targ, get_var = False, return_x = False):
     '''
     Returns targets and predictions
     '''
-    ys, preds, xs, vars, rhos = [],[], [], [], [] # add option to return xs
+    ys, yhats, vars, xs, = [],[], [], []  # add option to return xs
     model.eval()
     with torch.no_grad():
         for data in loader: 
-            rho = torch.IntTensor(0)
-            var = torch.IntTensor(0)
-            if get_var and get_rho:
-                out, var, rho = model(data)
-            elif get_var:
-                out, var = model(data)
-            else:
-                out = model(data)
             ys.append(data.y.view(-1,n_targ))
-            preds.append(out)
             xs.append(data.x)
-            vars.append(var)
-            rhos.append(rho)
-    ys = torch.vstack(ys)
-    preds = torch.vstack(preds)
-    xs = torch.vstack(xs)
-    vars = torch.vstack(vars)
-    rhos = torch.vstack(rhos)
+            if get_var:
+                pred_mu, pred_sig = model(data)
+                yhats.append(pred_mu)
+                vars.append(pred_sig)
+            else:
+                yhat = model(data)
+                yhats.append(yhat)
+    ys = torch.vstack(ys).cpu().numpy()
+    yhats = torch.vstack(yhats).cpu().numpy()
+    xs = torch.vstack(xs).cpu().numpy()
+
+    if get_var:
+        vars = torch.vstack(vars).cpu().numpy()
+        preds = [yhats, vars]
+    else:
+        preds = yhats
 
     if return_x: 
-        if get_rho: 
-            return ys.cpu().numpy(), preds.cpu().numpy(), xs.cpu().numpy(), vars, rhos
-        else:
-            return ys.cpu().numpy(), preds.cpu().numpy(), xs.cpu().numpy(), vars
+         return ys, preds, xs
     else: 
-        if get_rho: 
-            return ys.cpu().numpy(), preds.cpu().numpy(), vars, rhos
-        else:
-            return ys.cpu().numpy(), preds.cpu().numpy(), vars
+         return ys, preds
+    
 
 def final_test(taskdir, modelname):
     '''
@@ -142,7 +138,7 @@ def final_test(taskdir, modelname):
     '''
 
     sys.path.insert(0, 'ObservablesFromTrees/dev/') 
-    import models, loss_funcs, data_utils
+    import models, data_utils
 
     # Load exp parameters
     config = json.load(open(os.path.join(taskdir, modelname, 'expfile.json'), 'rb'))
@@ -151,6 +147,8 @@ def final_test(taskdir, modelname):
     data_params = config['data_params']
     used_targs = data_params['use_targs']
     used_feats = data_params['use_feats']
+    hyper_params['get_sig'] = True if run_params['loss_func'] in ["GaussNd", "Navarro"] else False 
+    hyper_params['get_cov'] = True if run_params['loss_func'] in ["GaussNd_corr"] else False
 
     # Load test data 
     hyper_params['in_channels'] = len(used_feats)
@@ -159,18 +157,57 @@ def final_test(taskdir, modelname):
     test_loader = DataLoader(test_data, batch_size=run_params['batch_size'], shuffle=0, num_workers=run_params['num_workers']) 
     
     # Run model on test data
-    model = getattr(models, run_params['model'])(**hyper_params)  #  = run_utils.get_model(run_params['model'], hyper_params)
+    model = getattr(models, run_params['model'])(**hyper_params) 
     model.load_state_dict(torch.load(f'{taskdir}/{modelname}/model_best.pt', map_location=torch.device('cpu')))
-    loss_func = getattr(loss_funcs, run_params['loss_func'])  # loss_func = run_utils.get_loss_func(run_params['loss_func'])
-    get_var = True if run_params['loss_func'] in ["Gauss1d", "Gauss2d", "GaussNd", "Gauss2d_corr", "Gauss4d_corr"] else False
-    get_rho = True if run_params['loss_func'] in ["Gauss2d_corr", "Gauss4d_corr"] else False 
     n_targ = len(used_targs)
-    testys, testpreds, _ = test(test_loader, model, n_targ, get_var, get_rho) 
-    metrics = {'sigma': np.std(testpreds - testys, axis=0),
-               'R': np.array([stats.pearsonr(testys[:,i], testpreds[:,i]).statistic for i in range(testys.shape[1])])}
-    pickle.dump((testys, testpreds, metrics), open(f'{taskdir}/{modelname}/testres.pkl', 'wb'))
+    get_var = True if hyper_params['get_sig'] or hyper_params['get_cov'] else False 
+    ys, preds = test(test_loader, model, n_targ, get_var) # testvars is [] if not get_var
+    if get_var: yhats = preds[0]
+    else: yhats = preds
+    metrics = {'rmse': np.std(yhats - ys, axis=0),
+               'rho': np.array([stats.pearsonr(ys[:,i], yhats[:,i]).statistic for i in range(ys.shape[1])]), # Pearson R
+               'R2': np.array([skmetrics.r2_score(ys[:,i], yhats[:,i]) for i in range(ys.shape[1])]), # coefficient of determination
+               'bias': np.mean(yhats - ys, axis=0)} # mean difference between yhat and y
+    pickle.dump((ys, preds, metrics), open(f'{taskdir}/{modelname}/testres.pkl', 'wb'))
 
-    return testys, testpreds, metrics
+    return ys, preds, metrics
+
+
+# def final_test(taskdir, modelname):
+#     '''
+#     Final test on test set
+#     '''
+
+#     sys.path.insert(0, 'ObservablesFromTrees/dev/') 
+#     import models, loss_funcs, data_utils
+
+#     # Load exp parameters
+#     config = json.load(open(os.path.join(taskdir, modelname, 'expfile.json'), 'rb'))
+#     run_params = config['run_params']
+#     hyper_params = config['hyper_params']
+#     data_params = config['data_params']
+#     used_targs = data_params['use_targs']
+#     used_feats = data_params['use_feats']
+
+#     # Load test data 
+#     hyper_params['in_channels'] = len(used_feats)
+#     hyper_params['out_channels'] = len(used_targs)
+#     test_data, _ = pickle.load(open(data_utils.get_subset_path(data_params, set = 'test'), 'rb')) 
+#     test_loader = DataLoader(test_data, batch_size=run_params['batch_size'], shuffle=0, num_workers=run_params['num_workers']) 
+    
+#     # Run model on test data
+#     model = getattr(models, run_params['model'])(**hyper_params)  #  = run_utils.get_model(run_params['model'], hyper_params)
+#     model.load_state_dict(torch.load(f'{taskdir}/{modelname}/model_best.pt', map_location=torch.device('cpu')))
+#     loss_func = getattr(loss_funcs, run_params['loss_func'])  # loss_func = run_utils.get_loss_func(run_params['loss_func'])
+#     get_var = True if run_params['loss_func'] in ["Gauss1d", "Gauss2d", "GaussNd", "Gauss2d_corr", "Gauss4d_corr"] else False
+#     get_rho = True if run_params['loss_func'] in ["Gauss2d_corr", "Gauss4d_corr"] else False 
+#     n_targ = len(used_targs)
+#     testys, testpreds, _ = test(test_loader, model, n_targ, get_var, get_rho) 
+#     metrics = {'sigma': np.std(testpreds - testys, axis=0),
+#                'R': np.array([stats.pearsonr(testys[:,i], testpreds[:,i]).statistic for i in range(testys.shape[1])])}
+#     pickle.dump((testys, testpreds, metrics), open(f'{taskdir}/{modelname}/testres.pkl', 'wb'))
+
+#     return testys, testpreds, metrics
 
 '''
 For comparing to simple MLP
@@ -388,51 +425,183 @@ class CPU_Unpickler(pickle.Unpickler):
         else:
             return super().find_class(module, name)
 
+
 def get_modelsDF(taskdir):
 
     # Create dict
-    models_list = [exp for exp in os.listdir(taskdir) if os.path.isdir(os.path.join(taskdir, exp)) and exp.startswith('e') and exp not in ['exp_tiny', 'exp1']]
-    cols = ['exp', 'DS', 'avg val sig', 'avg test sig', 'base', 'loss func', 'n epochs', 'stop epoch', 'feats', 'targs']
-    models = pd.DataFrame(columns = cols)
+    models_list = ['MLP1', 'MLP2', 'MLP3'] + [exp for exp in os.listdir(taskdir) if os.path.isdir(os.path.join(taskdir, exp)) and exp.startswith('e') and exp not in ['exp_tiny', 'exp1']]
+    all_info = []
 
-    # Add final halo only model for comparison
-    _, _, sm_test_results = pickle.load(open(osp.join(taskdir, 'model_justfinalhalos_testres.pkl'), 'rb'))
-    info_sm = ['MLP', 'vol100, z0', '',
-               np.round(np.mean(sm_test_results['sigma']),2), # mean over all targets
-               '', '', '', '',
-               '[#scale(0), desc_scale(2), Mvir(10), Rvir(11)]', '[U, B, V, K, g, r, i, z]']
-    models.loc[0] = info_sm
-
-    # Add all other models
+    # Fill with models 
     for model in models_list:
-        try: config = json.load(open(osp.join(taskdir, model, 'expfile.json'), 'rb'))
-        except FileNotFoundError:
-            print(f"ignoreing {model} (has no expfile.json)")
-            continue
-        try: results = CPU_Unpickler(open(osp.join(taskdir, model, 'result_dict.pkl'), 'rb')).load()
-        except FileNotFoundError:
-            print(f"Ignoreing {model} (has no result_dict.pkl)")
-            continue
-        try: 
-            _, _, test_results = pickle.load(open(osp.join(taskdir, model, 'testres.pkl'), 'rb'))
-            test_sig = np.round(np.mean(test_results['sigma']), 2) # mean over all targets
-        except FileNotFoundError:
-            test_sig = ''
+        if 'MLP' in model: 
+            resfile = f'{taskdir}/MLP/{model}_testres.pkl'
+            config = json.load(open(f'{taskdir}/MLP/{model}_config.json', 'rb'))
+        else: 
+            resfile = osp.join(taskdir, model, 'testres.pkl')
+            config = json.load(open(osp.join(taskdir, model, 'expfile.json'), 'rb'))
+            try: 
+                train_results = CPU_Unpickler(open(osp.join(taskdir, model, 'result_dict.pkl'), 'rb')).load()
+            except FileNotFoundError:
+                print(f"Ignoreing {model} (has no result_dict.pkl)")
+                continue
+        testys, testpreds, test_results = pickle.load(open(resfile, 'rb'))
+        if len(testpreds) ==2 :
+            avg_samp_res = data_utils.get_avg_samp_res(testys, testpreds, n_samples=10)
         vol = config['data_params']['data_path'].replace('~/ceph/Data/','')[:-1]
         ds = config['data_params']['data_file'].replace('.pkl','')
-        info = [model,
-                f'{vol}, {ds}',
-                np.round(np.mean(results['val sig final test']),2), # mean over all targets
-                test_sig,
-                config['run_params']['model'], 
-                config['run_params']['loss_func'], 
-                config['run_params']['n_epochs'], 
-                results['epochexit'], 
-                config['data_params']['use_feats'], 
-                config['data_params']['use_targs']]
-        models.loc[len(models)] = info
+        info = {'exp': model, 
+                'rho': np.round(np.mean(test_results['rho']),2), # mean over all targets
+                'avg samp rho': np.round(np.mean(avg_samp_res['rho']),2) if len(testpreds)==2 else '', # mean over all targets
+                'rmse': np.round(np.mean(test_results['rmse']),2), # mean over all targets
+                'avg samp rmse': np.round(np.mean(avg_samp_res['rmse']),2) if len(testpreds)==2 else '', # mean over all targets
+                'R2': np.round(np.mean(test_results['R2']),2), # mean over all targets, 
+                'avg samp R2': np.round(np.mean(avg_samp_res['R2']),2) if len(testpreds)==2 else '', # mean over all targets
+                'bias': np.round(np.mean(test_results['bias']),2), # mean over all targets
+                'avg samp bais': np.round(np.mean(avg_samp_res['bias']),2) if len(testpreds)==2 else '', # mean over all targets
+                #'val rmse': np.round(np.mean(train_results['val rmse final test']),2) if not 'MLP' in model else '', 
+                'loss func': config['run_params']['loss_func'], 
+                'n epochs': config['run_params']['n_epochs'], 
+                'feats' : config['data_params']['use_feats'], 
+                'targs': config['data_params']['use_targs'], 
+                'DS': f'{vol}, {ds}'
+                }
+        all_info.append(info)
 
-    return models
+        models = pd.DataFrame.from_dict(all_info)   
+        models['abs bias'] = np.abs(models['bias']) 
+        models = models.sort_values(by=['rho', 'rmse', 'R2', 'abs bias'], ascending=[False, True, False, False])
+        models.drop(columns=['abs bias'], inplace=True)
+
+
+        return models
+
+# def get_modelsDF(taskdir):
+
+#     # Create dict
+#     models_list = [exp for exp in os.listdir(taskdir) if os.path.isdir(os.path.join(taskdir, exp)) and exp.startswith('e') and exp not in ['exp_tiny', 'exp1']]
+#     cols = ['exp', 'DS', 'avg val sig', 'avg test sig', 'base', 'loss func', 'n epochs', 'stop epoch', 'feats', 'targs']
+#     models = pd.DataFrame(columns = cols)
+
+#     # Add final halo only model for comparison
+#     _, _, sm_test_results = pickle.load(open(osp.join(taskdir, 'model_justfinalhalos_testres.pkl'), 'rb'))
+#     info_sm = ['MLP', 'vol100, z0', '',
+#                np.round(np.mean(sm_test_results['sigma']),2), # mean over all targets
+#                '', '', '', '',
+#                '[#scale(0), desc_scale(2), Mvir(10), Rvir(11)]', '[U, B, V, K, g, r, i, z]']
+#     models.loc[0] = info_sm
+
+#     # Add all other models
+#     for model in models_list:
+#         try: config = json.load(open(osp.join(taskdir, model, 'expfile.json'), 'rb'))
+#         except FileNotFoundError:
+#             print(f"ignoreing {model} (has no expfile.json)")
+#             continue
+#         try: results = CPU_Unpickler(open(osp.join(taskdir, model, 'result_dict.pkl'), 'rb')).load()
+#         except FileNotFoundError:
+#             print(f"Ignoreing {model} (has no result_dict.pkl)")
+#             continue
+#         try: 
+#             _, _, test_results = pickle.load(open(osp.join(taskdir, model, 'testres.pkl'), 'rb'))
+#             test_sig = np.round(np.mean(test_results['sigma']), 2) # mean over all targets
+#         except FileNotFoundError:
+#             test_sig = ''
+#         vol = config['data_params']['data_path'].replace('~/ceph/Data/','')[:-1]
+#         ds = config['data_params']['data_file'].replace('.pkl','')
+#         info = [model,
+#                 f'{vol}, {ds}',
+#                 np.round(np.mean(results['val sig final test']),2), # mean over all targets
+#                 test_sig,
+#                 config['run_params']['model'], 
+#                 config['run_params']['loss_func'], 
+#                 config['run_params']['n_epochs'], 
+#                 results['epochexit'], 
+#                 config['data_params']['use_feats'], 
+#                 config['data_params']['use_targs']]
+#         models.loc[len(models)] = info
+
+#     return models
+
+
+# Perhaps this should go in loss_funcs at some point, if I use it as one
+
+def MMD(x, y, kernel):
+    """
+    This function is from https://www.onurtunali.com/ml/2019/03/08/maximum-mean-discrepancy-in-machine-learning.html
+
+    Emprical maximum mean discrepancy. 
+    The lower the result the more evidence that distributions are the same.
+
+    Args:
+        x: first sample, distribution P
+        y: second sample, distribution Q
+        kernel: kernel type such as "multiscale" or "rbf"
+    """
+
+    if not isinstance(x, torch.Tensor):
+        x = torch.tensor(np.array(x))
+    if not isinstance(y, torch.Tensor): 
+        y = torch.tensor(np.array(y))
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    xx, yy, zz = torch.mm(x, x.t()), torch.mm(y, y.t()), torch.mm(x, y.t())
+    rx = (xx.diag().unsqueeze(0).expand_as(xx))
+    ry = (yy.diag().unsqueeze(0).expand_as(yy))
+
+    dxx = rx.t() + rx - 2. * xx # Used for A in (1)
+    dyy = ry.t() + ry - 2. * yy # Used for B in (1)
+    dxy = rx.t() + ry - 2. * zz # Used for C in (1)
+
+    XX, YY, XY = (torch.zeros(xx.shape).to(device),
+                  torch.zeros(xx.shape).to(device),
+                  torch.zeros(xx.shape).to(device))
+
+    if kernel == "multiscale":
+
+        bandwidth_range = [0.2, 0.5, 0.9, 1.3]
+        for a in bandwidth_range:
+            XX += a**2 * (a**2 + dxx)**-1
+            YY += a**2 * (a**2 + dyy)**-1
+            XY += a**2 * (a**2 + dxy)**-1
+
+    if kernel == "rbf": # guassian?
+
+        bandwidth_range = [10, 15, 20, 50]
+        for a in bandwidth_range:
+            XX += torch.exp(-0.5*dxx/a)
+            YY += torch.exp(-0.5*dyy/a)
+            XY += torch.exp(-0.5*dxy/a)
+
+    return torch.mean(XX + YY - 2. * XY)
+
+
+'''
+For runnng sweeps
+'''
+
+def get_swp_num(out_pointer):
+
+    swp_nums = [f[f.find('_')+1:f.find('_')+1+f[f.find('_')+1:].find('_')]  for f in os.listdir(out_pointer) if 'res' in f]   # all numeric ids already created for this sweep
+    if len(swp_nums)==0:
+        swp_num = '0'
+    else:
+        swp_num = int(swp_nums[-1]) + 1
+    
+    return swp_num
+
+def make_info_dict(basedict, diffdict):
+
+    info_dict = basedict.copy()
+    for pkey in basedict.keys():
+        for key in basedict[pkey].keys():
+            info_dict[pkey][key] = diffdict[key]
+            
+    return info_dict
+
+def find_next_exp(out_pointer, donefile, sets):
+
+    raise NotImplementedError
 
 
 '''
