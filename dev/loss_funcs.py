@@ -19,33 +19,14 @@ def L1():
 def SmoothL1():
     return SmoothL1Loss(beta=0.5)
 
+def MSE():
+    return MSELoss()
+
 ###############################
 ###  Homemade loss funcs   ####
 ##########################################
 ###  All are negative log likelihoods   ####
-##########################################
-
-# def GaussNd(pred, ys, var):
-#     '''General uncorrelated gaussian'''
-#     z = (pred-ys)/var 
-#     sigloss = sum(log(var))
-#     err_loss = sum((square(z)))/2 
-    
-#     return err_loss+sigloss, err_loss, sigloss    
-
-def Gauss2d(pred, ys, var): # If predicting exactly 2 targets?
-    '''2d Gaussian, can be subbed for GaussND'''
-    sig1=var[:,0]
-    sig2=var[:,1]
-    z1=(pred[:,0]-ys[:,0])/sig1
-    z2=(pred[:,1]-ys[:,1])/sig2
-    sigloss=sum(log(sig1)+log(sig2))
-    err_loss = sum((z1**2+z2**2)/2)
-    
-    return err_loss+sigloss, err_loss, sigloss
-
-def MSE():
-    return MSELoss()
+########################################## 
 
 def GaussNd(pred_mu, ys, pred_sig):
     '''
@@ -61,6 +42,13 @@ def GaussNd(pred_mu, ys, pred_sig):
     
     return err_loss+sig_loss, err_loss, sig_loss    
 
+# def GaussNd(pred, ys, var):
+#     '''General uncorrelated gaussian'''
+#     z = (pred-ys)/var 
+#     sigloss = sum(log(var))
+#     err_loss = sum((square(z)))/2 
+    
+#     return err_loss+sigloss, err_loss, sigloss   
 
 def Navarro(pred_mu, ys, pred_sig):
     '''
@@ -104,3 +92,16 @@ def GuassNd_corr(pred_mu, ys, pred_cov):
     # log_prob = y_dist.log_prob(ys) # ??????
     
     raise NotImplementedError('Loss function not yet implemented')
+
+ # If predicting exactly 2 targets?
+def Gauss2d(pred, ys, var):
+    '''2d Gaussian, can be subbed for GaussND'''
+
+    sig1=var[:,0]
+    sig2=var[:,1]
+    z1=(pred[:,0]-ys[:,0])/sig1
+    z2=(pred[:,1]-ys[:,1])/sig2
+    sigloss=sum(log(sig1)+log(sig2))
+    err_loss = sum((z1**2+z2**2)/2)
+    
+    return err_loss+sigloss, err_loss, sigloss
