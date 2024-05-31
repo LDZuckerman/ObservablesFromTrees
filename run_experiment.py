@@ -3,8 +3,6 @@ Save exp.json file in parent directory of ObservablesFromTrees
 In parent directory, run 'python ObservablesFromTrees/run_experiment.py -f exp.json -gpu 1'
 '''
 
-print(f"Running {__file__}")
-
 import os, json, shutil, argparse
 import os.path as osp
 import dev.train_script as train_script
@@ -20,7 +18,7 @@ args = parser.parse_args()
 exp_file = osp.expanduser(args.f) # osp.join(osp.abspath(''), args.f)
 dict = json.load(open(exp_file))
 print(f"Experiment parameters: \n{dict}\n")
-print(f'\nSETTING UP EXPERIMENT\n') # print(f'\nParameters are the following -> \n{d}')
+print(f'\nSETTING UP EXPERIMENT\n') 
 
 # Set up output and copy experiment json file to output dir 
 out_pointer = osp.expanduser(f"{dict['task_dir']}{dict['exp_id']}") # Dir for saving all training outputs (if n_trial > 1, will create subfolders. Will also have subfolder for TF logging)
@@ -39,9 +37,8 @@ try:
 except shutil.SameFileError: 
     print(f"Using experiment file in {out_pointer}/")
 
-
 # Train (train and val for each of n_trials)
-train_script.run(dict['run_params'], dict['data_params'], dict['learn_params'], dict['hyper_params'], out_pointer, dict['exp_id'], args.gpu)
+train_script.run(dict['run_params'], dict['data_params'], dict['learn_params'], dict['hyper_params'], out_pointer, dict['exp_id'], eval(args.gpu))
 print('DONE')
 
 
