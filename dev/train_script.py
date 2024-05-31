@@ -1,49 +1,57 @@
-from networkx import k_components
-import torch, pickle, time, os
+import torch, pickle, time
 import numpy as np
 import os.path as osp
-import shutil
-import matplotlib.pyplot as plt
-import torch_geometric as tg
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Data
+from torch.utils.tensorboard import SummaryWriter 
 from accelerate import Accelerator 
 from importlib import __import__
-import random
-import string
 from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 import sys
-sys.path.insert(0, 'ObservablesFromTrees/dev/')
-from dev import run_utils, data_utils, models
-import json
+try: 
+    from dev import data_utils, run_utils
+except ModuleNotFoundError:
+    try:
+        sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
+        from ObservablesFromTrees.dev import data_utils, run_utils
+    except ModuleNotFoundError:
+        sys.path.insert(0, 'ObservablesFromTrees/dev/')
+        from dev import data_utils, run_utils
 
-
-def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id, gpu, low_output=False): # "train_model"
+def run(run_params, data_params, learn_params, hyper_params, out_pointer, exp_id, gpu, low_output=False, proc=None): # "train_model"
     """
-    For each of n_trials, train and validate (or train and test) model
+    Train and validate model (for one or multiple trials) and save results
     """
 
-    for k in ["hidden_channels", "conv_layers", "decode_layers"]: # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
-        if isinstance(hyper_params[k], str): hyper_params[k] = int(hyper_params[k]) 
-    for k in ["n_epochs", "n_trials", "batch_size", "val_epoch", "patience", "l1_lambda", "l2_lambda", "num_workers"]: # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
-        if isinstance(run_params[k], str): run_params[k] = int(run_params[k]) 
-    for k in learn_params.keys(): # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
-        if isinstance(learn_params[k], str) and k != "schedule": learn_params[k] = float(learn_params[k]) 
+    # for k in ["hidden_channels", "conv_layers", "decode_layers"]: # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
+    #     if isinstance(hyper_params[k], str): hyper_params[k] = int(hyper_params[k]) 
+    # for k in ["n_epochs", "n_trials", "batch_size", "val_epoch", "patience", "l1_lambda", "l2_lambda", "num_workers"]: # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
+    #     if isinstance(run_params[k], str): run_params[k] = int(run_params[k]) 
+    # for k in learn_params.keys(): # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
+    #     if isinstance(learn_params[k], str) and k != "schedule": learn_params[k] = float(learn_params[k]) 
+    if gpu not in [True, False]: raise ValueError(f"gpu must be True or False, not {gpu}")
+    p = '' if proc == None else f'[proc {proc}] '
     
     ############### SET UP ################
-    
+
+    # If low output mode, overwrite output params
+    if low_output:
+        run_params['performance_plot'] = "None"
+        run_params['log'] = "False"
+
     # Set up epoch counting 
     n_epochs = run_params['n_epochs'] # total num epochs
     val_epoch = run_params['val_epoch']
-    exitepochs = [] # epoch at which exited training (or list of epochs if n_trials > 1), if early stopping 
+    exit_epoch = [] # epoch at which exited training (or list of epochs if n_trials > 1), if early stopping 
     
     # Get loss function
     if run_params['seed']: torch.manual_seed(42)
-    loss_func = run_utils.get_loss_func(run_params['loss_func'])
-    hyper_params['get_sig'] = True if run_params['loss_func'] in ["GaussNd", "Navarro"] else False 
-    hyper_params['get_cov'] = True if run_params['loss_func'] in ["GaussNd_corr"] else False
+    loss_name = run_params['loss_func']
+    loss_func = run_utils.get_loss_func(loss_name)
+    hyper_params['get_sig'] = True if loss_name in ["GaussNd", "Navarro"] else False 
+    hyper_params['get_cov'] = True if loss_name in ["GaussNd_corr"] else False
 
     # Set learning rate and schedular
     lr_init = learn_params['learning_rate'] # If no warmup (e.g. if schedule = onecycle, initial learning rate should be max learning rate)
@@ -54,70 +62,66 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
     # Create subset dataset (dataset with feat/targ selections applied, transform applied, and split into train and test)
     subset_path = data_utils.get_subset_path(data_params, set = 'train')
     if not osp.exists(f'{subset_path}'):
+        print(f"{p}Dataset subset {subset_path} does not yet exist", flush=True)
         train_data, val_data = data_utils.create_subset(data_params, return_set = 'train') 
     else: # for sweeps, should probabaly just load once and pass in.. but this doesnt really take that long
-        print(f"Dataset subset already exists. Loading from {subset_path}", flush=True)
+        print(f"{p}Dataset subset already exists. Loading from {subset_path}", flush=True)
         train_data, val_data = pickle.load(open(subset_path, 'rb'))
 
     # Load data and add num in/out channels to hyper_params
-    targ_names = data_params['use_targs'] 
+    targ_names = data_params['use_targs']
     n_targ = len(train_data[0].y)
-    if len(train_data[0].y) != len(targ_names): raise ValueError(f"Number of targets in data ({len(train_data[0].y)}) does not match number of targets in data_params ({len(targ_names)})")
-    if train_data[0].x.numpy().shape[1] != len(data_params['use_feats']): raise ValueError(f"Number of features in data ({train_data[0].x.numpy().shape[1]}) does not match number of features in data_params ({len(data_params['use_feats'])})")
-    val_loader = DataLoader(val_data, batch_size=int(run_params['batch_size']), shuffle=0, num_workers=run_params['num_workers']) # REALLY TEST_LOADER IF TEST=1 IN JSON!   ##never shuffle test
+    if len(train_data[0].y) != len(targ_names): raise ValueError(f"Number of targets in data ({len(train_data[0].y)}) does not match number of targets in data_params ({len(targ_names)})")   
+    if train_data[0].x.numpy().shape[1] != len(data_params['use_feats']): raise ValueError(f"Number of features in data ({train_data[0].x.numpy().shape[1]}) does not match number of features in data_params ({len(data_params['use_feats'])})")   
+    val_loader = DataLoader(val_data, batch_size=int(run_params['batch_size']), shuffle=0, num_workers=run_params['num_workers'])  # REALLY TEST_LOADER IF TEST=1 IN JSON!   ##never shuffle test   
     hyper_params['in_channels']= train_data[0].x.numpy().shape[1] # construct_dict['hyper_params']['in_channels']=n_feat
     hyper_params['out_channels']= n_targ # construct_dict['hyper_params']['out_channels']=n_targ
-
-    # Initialize evaluation metrics 
-    # metric = get_metrics(run_params['metrics']) # FOR NOW JUST USE SCATTER SIGMA 
-    performance_plot = get_performance_plot(run_params['performance_plot']) # returns None if performance_plot = None
-    # tr_accs_alltrials, va_accs_alltrials, scatter_alltrials, = [], [], [] # lists in case n_trials > 1 
-    # preds_alltrials, lowest_alltrials = [], [] # lists in case n_trials > 1 
     
+    # Initialize evaluation metrics 
+    if eval(str(run_params['performance_plot'])) != None:
+        performance_plot = get_performance_plot(run_params['performance_plot']); print(f"{p}Line 84", flush=True) # returns None if performance_plot = None
+        # tr_accs_alltrials, va_accs_alltrials, scatter_alltrials, preds_alltrials, lowest_alltrials = [], [], [], [], [] # lists in case n_trials > 1 
     ############### LOOP THROUGH TRIALS ###################
     
     # Perform experiment (either once or n_trials times)
-    n_trials = run_params['n_trials']
+    n_trials = run_params['n_trials']; print(f"{p}Line 87", flush=True)
     log = run_params['log']
     for trial in range(n_trials):
 
         # Set logging, state-saving, and result output dirs
         if n_trials>1:
-            run_name_n = run_id+f'_{trial+1}_{n_trials}'
+            run_name_n = exp_id+f'_{trial+1}_{n_trials}'
             out_dir_n = osp.join(out_pointer, run_name_n)
+            raise ValueError("Should probabaly change this.. I think I would prefer to have the trials all in the same folder, within the exp folder")
         else:
-            run_name_n = run_id 
+            run_name_n = exp_id 
             out_dir_n = out_pointer
-        if log:
+        if eval(str(log)):
             log_dir_n = osp.join(out_pointer+'/TB_logs/', run_name_n) # for TensorBoard events files
-            from torch.utils.tensorboard import SummaryWriter 
             writer=SummaryWriter(log_dir=log_dir_n)
-        else: writer = None
-        if 'sweep' in run_id:
-            resfile = f'{out_dir_n}/{run_id}_result_dict.pkl' # If this is part of a sweep, don't create individiual output folders, just result files
-            modelfile = f'{out_dir_n}/{run_id}_model_best.pt' # If this is part of a sweep, don't create individiual output folders, just result files
-        else: 
+        if proc == None:
             resfile = f'{out_dir_n}/result_dict.pkl'
             modelfile = f'{out_dir_n}/model_best.pt'
-        
+        else: 
+            resfile =  f'{out_dir_n}/{exp_id}_result_dict.pkl' # If this is part of a sweep, don't create individiual output folders, just result files
+            modelfile = f'{out_dir_n}/{exp_id}_model_best.pt' # If this is part of a sweep, don't create individiual output folders, just result files
         # Initialize model, dataloaders, scheduler, and optimizer
         model = run_utils.get_model(run_params['model'], hyper_params) # print(f"N_params: {sum(p.numel() for p in model.parameters())}", flush=True)
         train_loader = DataLoader(train_data, batch_size=run_params['batch_size'], shuffle=True, num_workers=run_params['num_workers']) #shuffle training
         optimizer = torch.optim.Adam(model.parameters(), lr=lr_init)
         scheduler = lr_scheduler(optimizer, **learn_params, total_steps=n_epochs*len(train_loader))
        
-        # If gpu, feed to accelerator  #
-        # CRAP, WAS I NOT DOING THIS BEFORE?? BECAUSE NOW I HAD TO FIX THE TORCH-SCATTER ISSUES TO GET IT TO WORK
-        # AND 
-        # DID I ACCIDENTALLY HAVE GPU NOT SET TO 1?? BUT THEN WHY WERE RESULTS PICKLED ON GPU??
-        if gpu == '1':
+        # If gpu, feed to accelerator 
+        if gpu:
             accelerator = Accelerator() 
             device = accelerator.device
             _, _, val_loader = accelerator.prepare(model, optimizer, val_loader) 
             model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
         else: 
             accelerator = None
-        
+        if not next(model.parameters()).is_cuda:
+            raise ValueError("Model is not on GPU. Is this intentional?")
+
         # Initialize accuracy and error tracking
         lowest_metric = np.array([np.inf]*n_targ) 
         low_ys = torch.tensor([np.inf]) # added this so that can have get_val_results as a function
@@ -133,11 +137,11 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
         start = time.time()
         k = 0
         
-        ###################### TRAIN (n epochs) #########################
-        
+        ###################### TRAIN (n epochs) #########################     
         # Perform training
+        t0 = time.time()
         s = '' if n_trials==1 else f' FOR TRIAL {trial+1} of {n_trials}'
-        print(f'\nBEGINING TRAINING{s} ({n_epochs} epochs total)\n', flush=True)
+        print(f'{p}BEGINING TRAINING{s} OF {exp_id} ({n_epochs} epochs total)', flush=True)
         for epoch in tqdm(range(n_epochs)):
 
             # Train for one epoch (NOTE: trainloss is the total loss that includes the other losses returned)
@@ -190,13 +194,14 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
                 va_rmses.append(val_rmse)
                 lr_curr = optimizer.state_dict()['param_groups'][0]['lr']
                 lrs.append(lr_curr)
-                last10val = np.median(va_metrics[-(10//val_epoch):], axis=0)  
+                #last10val = np.median(va_metrics[-(10//val_epoch):], axis=0)  
                 
                 # Print results and add results to logger
-                print_results_and_log(run_params, log, writer, epoch, lr_curr, tot_loss, err_loss, var_loss, l1_loss, l2_loss, train_metric, val_metric, lowest_metric, last10val, counter, n_targ, targ_names)
+                if not low_output:
+                    print_results_and_log(eval(str(log)), loss_name, writer, epoch, lr_curr, tot_loss, err_loss, var_loss, l1_loss, l2_loss, train_metric, val_metric, lowest_metric, counter, n_targ, targ_names)
                 
-                # Every 5th val epoch make (or update - will overwrite each time?) plots 
-                if (epoch+1)%(int(val_epoch*5))==0 and log and not low_output:
+                # Every 5th val epoch make plots (really update - will overwrite each time) 
+                if eval(str(run_params['performance_plot'])) != None and (epoch+1)%(int(val_epoch*5))==0:
                     figs = performance_plot(va_ys, va_preds, targ_names)
                     for fig, label in zip(figs, targ_names):
                         writer.add_figure(tag=f'{run_name_n}_{label}', figure=fig, global_step=epoch+1)
@@ -205,7 +210,7 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
                         
             if run_params['early_stopping']:
                 if counter > run_params['patience']:
-                    print(f'Exited after {epoch+1} epochs due to early stopping', flush=True)
+                    print(f'{p}Exited training of {exp_id} after {epoch+1} epochs due to early stopping', flush=True)
                     epochexit = epoch
                     break
             
@@ -216,12 +221,12 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
         
         if epochexit == None: # if never had to exit early (if count was never > patience, or we weren't doing early stopping)
             epochexit = n_epochs
-        exitepochs.append(epochexit)
+        exit_epoch.append(epochexit)
         # va_accs_alltrials.append(va_acc) # REALLY TEST_ACCS IF TEST=1 IN JSON!!!
         # tr_accs_alltrials.append(tr_acc)
         # lowest_alltrials.append(lowest_metric)
 
-        print(f"\nTRAINING COMPLETE{s} (total {spent:.2f} sec, {spent/epochexit:.3f} sec/epoch, {len(train_loader.dataset)*epochexit/spent:.0f} trees/sec)\n", flush=True)
+        print(f"{p}TRAINING OF {exp_id} COMPLETE{s} (total {spent:.2f} sec, {spent/epochexit:.3f} sec/epoch, {len(train_loader.dataset)*epochexit/spent:.0f} trees/sec)", flush=True)
           
         ###################### LOAD IN BEST MODEL, "TEST" ON VAL AND, RESULTS TO LISTS, PLOT #########################
         
@@ -232,7 +237,7 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
             yhats = preds[0]
         else:
             yhats = preds
-        if run_params['save_plots']:
+        if eval(str(run_params['performance_plot'])) != None:
             figs = performance_plot(ys, yhats, targ_names)
             for fig, label in zip(figs, targ_names): 
                 fig.savefig(f'{out_dir_n}/performance_ne{n_epochs}_{label}.png')
@@ -241,13 +246,13 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
         final_testonval_metric = np.std(ys-yhats, axis=0)
         final_testonval_rmse = np.sqrt(np.mean((ys-yhats)**2, axis=0))
         # preds_alltrials.append(pred)
-        print(f"\nFINAL TESTING RMSE{s}: {np.round(final_testonval_rmse, 4)}", flush=True)
+        print(f"\n{p}FINAL VALIDATION TEST RMSE{s} FOR {exp_id} : {np.round(final_testonval_rmse, 4)}", flush=True)
         
         ###################### SAVE PARAMS AND RESULTS (for this trial) #########################
   
         if not low_output:
 
-            # Make params  and metrics dicts to add to writer
+            # Make params and metrics dicts to add to writer
             paramsf = dict(list(data_params.items()) + list(run_params.items()) + list(hyper_params.items()) + list(learn_params.items()))
             paramsf["targets"] = str(data_params['use_targs']) 
             paramsf["use_feats"] = str(data_params["use_feats"])
@@ -272,13 +277,13 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
                 metricf[f'last10_{targ_names[i]}'] = last10[i]
             writer.add_hparams(paramsf, metricf, run_name=run_name_n) 
         
-        # Save results dict as pickle
+        # Collect results into dict
         result_dict={'tot loss each epoch': tot_losses,             # [n_epochs]
                      'sig loss each epoch': var_losses,             # [n_epochs]
                      'err loss each epoch': err_losses,             # [n_epochs]
                      'lr each val epoch': lrs,                      # [n_epochs/val_epoch]    
-                     'val metric each val epoch': va_metrics,      # [n_epochs/val_epoch, n_targs]
-                     'train metric each val epoch': tr_metrics,    # [n_epochs/val_epoch, n_targs]
+                     'val metric each val epoch': va_metrics,       # [n_epochs/val_epoch, n_targs]
+                     'train metric each val epoch': tr_metrics,     # [n_epochs/val_epoch, n_targs]
                      'val rmse each val epoch': va_rmses,           # [n_epochs/val_epoch, n_targs]
                      'train rmse each val epoch': tr_rmses,         # [n_epochs/val_epoch, n_targs]
                      'val metric final test': final_testonval_metric,  # [n_targs] # same as RMSE
@@ -286,11 +291,15 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, run_id
                      'val preds final test': final_testonval_preds, # [[n_val_samples, n_targs], [n_val_samples, n_targs]] 
                      'val ys final test': final_testonval_ys,       # [n_val_samples, n_targs]
                       #'ys': ys, 'pred': pred, 'low_ys': low_ys, 'low_pred': low_pred, 'low':lowest_metrics, 'vars': vars, 'rhos': rhos,  # Why is it usefull to save these at all? 
-                     'epochexit': epochexit}
-        with open(resfile, 'wb') as handle:
-            pickle.dump(result_dict, handle)
+                     'epochexit': epochexit,
+                     'training time': t0-time.time(),
+                     'gpu': gpu}
         
-    print(f'\nFINISHED ALL TRIALS', flush=True)
+        # Save results to pickle 
+        print(f"{p}SAVING RESULTS FOR {exp_id} TO {resfile}", flush=True)
+        pickle.dump(result_dict, open(resfile, 'wb'))
+        
+    if n_trials > 1: print(f'\nFINISHED ALL {n_trials} TRIALS', flush=True)
     
 
 def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_func, accelerator, optimizer, scheduler):
@@ -308,7 +317,7 @@ def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_fu
     l1_lambda = run_params['l1_lambda']
     l2_lambda = run_params['l2_lambda']
 
-    if gpu == '1': init = torch.cuda.FloatTensor([0])
+    if gpu: init = torch.cuda.FloatTensor([0])
     else: init = torch.FloatTensor([0])
     predict_dist = True if run_params['loss_func'] in ["GaussNd", "Navarro", "GaussNd_corr"] else False # sig OR cov 
     er_loss = torch.clone(init)
@@ -317,7 +326,7 @@ def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_fu
 
     return_loss = 0
     for data in train_loader: 
-        if gpu == '0':
+        if not gpu:
             data = data.to('cpu')
         if predict_dist:
             out, var = model(data)  # var is either sig OR cov
@@ -331,7 +340,7 @@ def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_fu
         l2_norm = sum(p.pow(2.0).sum() for p in model.parameters()) 
         loss = loss + l1_lambda * l1_norm + l2_lambda * l2_norm # add terms to penalize large param values to loss (?)
         return_loss += loss
-        if gpu == '1':
+        if gpu:
             accelerator.backward(loss)
         else: 
             loss.backward()
@@ -344,26 +353,26 @@ def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_fu
     return return_loss, er_loss, va_loss, l1_lambda * l1_norm, l2_lambda * l2_norm           
 
 
-def print_results_and_log(run_params, log, writer, epoch, lr_curr, trainloss, err_loss, var_loss, l1_loss, l2_loss, train_metric, val_metric, lowest_metric, last10val, counter, n_targ, targ_names):
+def print_results_and_log(log, loss_name, writer, epoch, lr_curr, trainloss, err_loss, var_loss, l1_loss, l2_loss, train_metric, val_metric, lowest_metric, counter, n_targ, targ_names):
     
     # Add val results to TensorBoard logger
     if log:
         writer.add_scalar('train_loss', trainloss,global_step=epoch+1)
         writer.add_scalar('learning_rate', lr_curr, global_step=epoch+1)
         for i in range(n_targ):
-            writer.add_scalar(f'last10val_{targ_names[i]}', last10val[i], global_step=epoch+1) # WAS CALLING LAST10VAL LAST10TEST BUT ITS ONLY TEST IF TEST=1 IN JSON!!!
+            #writer.add_scalar(f'last10val_{targ_names[i]}', last10val[i], global_step=epoch+1) 
             writer.add_scalar(f'train_scatter_{targ_names[i]}', train_metric[i], global_step=epoch+1)
-            writer.add_scalar(f'val_scatter_{targ_names[i]}', val_metric[i], global_step=epoch+1) # WAS CALLING VAL_SCATTER TEST_SCATTER BUT ITS ONLY TEST IF TEST=1 IN JSON!!!
+            writer.add_scalar(f'val_scatter_{targ_names[i]}', val_metric[i], global_step=epoch+1) 
             writer.add_scalar(f'best_scatter_{targ_names[i]}', lowest_metric[i], global_step=epoch+1)
     
     # Print train and val results 
     print(f'\nEpoch {int(epoch+1)} (learning rate {lr_curr:.2E})', flush=True)
     print(f'\tTrain losses: total = {trainloss.cpu().detach().numpy():.2E},  L1 regularization = {l1_loss.cpu().detach().numpy():.2E},  L2 regularization = {l2_loss.cpu().detach().numpy():.2E}', flush=True)
     print(f'\tTrain metric (scatter): {np.round(train_metric,4)}', flush=True)
-    if run_params["loss_func"] in ["Gauss1d", "Gauss2d", "Gauss2d_corr", "Gauss4d_corr", "Gauss_Nd"]:
+    if loss_name in ["Gauss1d", "Gauss2d", "Gauss2d_corr", "Gauss4d_corr", "Gauss_Nd"]:
         print(f'\t[Err/Sig/Rho]: {err_loss.cpu().detach().numpy()[0]:.2E}, {var_loss.cpu().detach().numpy()[0]:.2E}',  flush=True)       
-    print(f'\tVal metric (scatter): {np.round(val_metric,4)}, lowest was {np.round(lowest_metric,4)}', flush=True)  # WAS CALLING VAL_SCATTER TEST_SCATTER BUT ITS ONLY TEST IF TEST=1 IN JSON!!!
-    print(f'\tMedian metric (scatter) for last 10 val epochs: {np.round(last10val,4)} ({counter} epochs since last improvement)', flush=True)
+    print(f'\tVal metric (scatter): {np.round(val_metric,4)}, lowest was {np.round(lowest_metric,4)}', flush=True) 
+    print(f'\t{counter} epochs since last improvement', flush=True) #print(f'\tMedian metric (scatter) for last 10 val epochs: {np.round(last10val,4)} ({counter} epochs since last improvement)', flush=True)
     
     return
     
@@ -382,9 +391,8 @@ def get_performance_plot(name):
     '''
     Load plotting function from plot_utils file
     '''
-
     import dev.plot_utils as evals
-    if name != None:
+    if name not in [None, "None"]:
         performance_plot = getattr(evals, name)
     else:
         performance_plot = None

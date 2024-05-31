@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
 import pickle
+from sympy import E
 import torch
 import pandas as pd
 import scipy.stats as stats
@@ -13,10 +14,14 @@ from torch_geometric.loader import DataLoader
 from torch import nn
 import sklearn.metrics as skmetrics
 try: 
-    from dev import data_utils
-except:
-    sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
-    from ObservablesFromTrees.dev import data_utils
+    from dev import data_utils, models, train_script, loss_funcs
+except ModuleNotFoundError:
+    try:
+        sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
+        from ObservablesFromTrees.dev import data_utils, models, train_script, loss_funcs
+    except ModuleNotFoundError:
+        sys.path.insert(0, 'ObservablesFromTrees/dev/')
+        from dev import data_utils, models, train_script, loss_funcs
 
 # Fit transformer to data
 def fit_transformer(allgraphs, featnames, save_path, transfname, plot=False, return_xt=False):
@@ -66,7 +71,6 @@ def get_model(model_name, hyper_params):
     '''
     Load model object from model folder
     '''
-
     sys.path.insert(0, 'ObservablesFromTrees/dev/') 
     from dev import models 
 
@@ -80,10 +84,10 @@ def get_loss_func(name):
     '''
     Load loss function from loss_funcs file
     '''
+    # sys.path.insert(0, 'ObservablesFromTrees/dev/') 
+    # from dev import loss_funcs
 
-    import dev.loss_funcs as loss_func_module  
-
-    loss_func = getattr(loss_func_module, name)
+    loss_func = getattr(loss_funcs, name)
     try:
         l=loss_func()
     except:
@@ -210,55 +214,49 @@ def final_test(taskdir, modelname):
 #     return testys, testpreds, metrics
 
 '''
-For comparing to simple MLP
+For comparing to simple Final Halo Only MLP
 '''
-def run_simplemodel(taskdir, predict_mu_sig, loss_fn, hidden_layers=1, n_epochs=100, lr=0.1, retrain=False, name=''):
+def run_simplemodel(taskdir, loss_fn, hidden_layers=4, n_epochs=200, lr=0.1, retrain=False, name='', vol='vol100', dataset='DS1', targ_type='phot'):
 
     print(f"Running model {name}")
-
-    # Hardcoded parameters 
-    datapath = '/mnt/home/lzuckerman/ceph/Data/vol100/'
-    dataset = 'DS1'
-    data_meta = json.load(open(f"{datapath}{dataset}_meta.json", 'rb'))
-    all_labelnames = data_meta[1]['obs meta']['label_names'] 
-    all_featnames = data_meta[2]['tree meta']['featnames']
     use_feats = ['Mvir(10)']
+    if targ_type == 'phot': use_targs = ["U", "B", "V", "K", "g", "r", "i", "z"] # all 
+    if targ_type == 'props': use_targs = ["SubhaloBHMass", "SubhaloGasMass", "SubhaloStelMass", "SubhaloSFR", "SubhaloVmax"] # from Task_props exp1
 
     # Create simple dataset (if not already created)
-    if not os.path.exists(f'{datapath}{dataset}_finalhalosdata.pkl'):
-        print('Final halos only dataset not already created, creating now')
-        usetarg_idxs = [all_labelnames.index(targ) for targ in all_labelnames] 
-        used_featidxs = [all_featnames.index(f) for f in all_featnames if f in use_feats]
-        allgraphs = pickle.load(open(f"{datapath}{dataset}.pkl", 'rb'))
-        traintransformer_path = osp.expanduser(f"{datapath}{dataset}_QuantileTransformer_train.pkl") 
-        ft_train = pickle.load(open(traintransformer_path, 'rb')) # SHOULD REALLY BE USING SEPERATE TRANSFORMERS FOR TRAIN AND TEST BUT ACCIDENTALLY DIDNT SAVE TEST ONE YET
-        sm_traindata, sm_testdata = data_utils.data_finalhalos(allgraphs, used_featidxs, usetarg_idxs, ft_train, dataset) # data_utils.data_fake()
-        pickle.dump((sm_traindata, sm_testdata), open(f'{datapath}{dataset}_finalhalosdata.pkl', 'wb'))
+    datapath = f'/mnt/home/lzuckerman/ceph/Data/{vol}/'
+    if not os.path.exists(f'{datapath}/{dataset}_finalhalosdata.pkl'):
+        print(f'  Final halos only dataset not already created for {dataset}, creating now')
+        sm_traindata, sm_testdata = data_utils.data_finalhalos(datapath, dataset, targ_type, use_feats, use_targs) # data_utils.data_fake()
+        pickle.dump((sm_traindata, sm_testdata), open(f'{datapath}/{dataset}_finalhalosdata.pkl', 'wb'))
 
     # Get data
-    sm_traindata, sm_testdata = pickle.load(open(f'{datapath}{dataset}_finalhalosdata.pkl', 'rb'))
+    print(f"  Loading train and test data from {datapath}/{dataset}_finalhalosdata.pkl")
+    sm_traindata, sm_testdata = pickle.load(open(f'{datapath}/{dataset}_finalhalosdata.pkl', 'rb'))
     sm_trainloader = DataLoader_notgeom(sm_traindata, batch_size=256, shuffle=True, num_workers=2)
-    sm_testloader = DataLoader_notgeom(sm_testdata, batch_size=256, shuffle=True, num_workers=2)
+    sm_testloader = DataLoader_notgeom(sm_testdata, batch_size=256, shuffle=False, num_workers=2) # SHOULD HAVE HAD SHUFFLE=FALSE!
     in_channels = len(next(iter(sm_traindata))[0])
     out_channels = len(next(iter(sm_traindata))[1])
 
     # Train (if not already trained)
-    if predict_mu_sig:
+    get_var = loss_fn in ['GaussNd', 'Navarro', 'Navarro2']
+    if get_var:
         model = models.SimpleDistNet(hidden_layers, 50, in_channels, out_channels)
     else:
         model = models.SimpleNet(100, in_channels, out_channels)
-    modelpath =  f'{taskdir}/MLP/{name}.pt'
+    modelpath =  f'{taskdir}/FHO/{name}.pt'
     if (not os.path.exists(modelpath)) or retrain:
-        loss_func = get_loss_func(loss_fn)
-        simple_train(model, sm_trainloader, predict_mu_sig, loss_func, lr, n_epochs, name=name)
+        print(f'  Training {name} ({model}, {n_epochs} epochs, loss_fn {loss_fn})')
+        simple_train(model, sm_trainloader, loss_fn, lr, n_epochs, name=name)
         torch.save(model.state_dict(), modelpath)
+    else: print(f'  Trained model already exists for {name}. Loading it back in to compute test results')
 
     # Test and save results
+    print(f'  Testing {name}')          
     model.load_state_dict(torch.load(modelpath))
-    ys, preds = simple_test(sm_testloader, model, get_var = predict_mu_sig) 
-    if predict_mu_sig: yhats = preds[0]
-    else: yhats = preds
-    metrics = {'rmse': np.std(yhats - ys, axis=0),
+    ys, preds = simple_test(sm_testloader, model, get_var=get_var) 
+    yhats = data_utils.get_yhats(preds, sample_method='single') # If this is a dist-predicting model, do sample to get yhats
+    metrics = {'rmse': np.std(yhats - ys, axis=0), 
                'rho': np.array([stats.pearsonr(ys[:,i], yhats[:,i]).statistic for i in range(ys.shape[1])]), 
                'R2': np.array([skmetrics.r2_score(ys[:,i], yhats[:,i]) for i in range(ys.shape[1])]), 
                'bias': np.mean(yhats - ys, axis=0)}
@@ -267,15 +265,20 @@ def run_simplemodel(taskdir, predict_mu_sig, loss_fn, hidden_layers=1, n_epochs=
     # Save "config" file for future reference 
     config = {'run_params': {'model':name, 'loss_func':loss_fn, 'n_epochs':n_epochs}, 
               'hyper_params': {'hidden_layers':hidden_layers, 'lr':lr},
-              'data_params': {'data_path':'~/ceph/Data/vol100/', 'data_file':f'{dataset}z0', 'use_feats':['#scale(0)', 'desc_scale(2)', 'Mvir(10)', 'Rvir(11)'], 'use_targs':['U', 'B', 'V', 'K', 'g', 'r', 'i', 'z']}}
+              'data_params': {'data_path':'~/ceph/Data/vol100/', 
+                              'data_file':f'{dataset}z0', 
+                              'use_feats': use_feats, 
+                              'use_targs':['U', 'B', 'V', 'K', 'g', 'r', 'i', 'z']}}
     json.dump(config, open(f'{modelpath.replace(".pt", "")}_config.json', 'w'))
 
     return ys, preds, metrics
 
 # Train simple model
-def simple_train(model, trainloader, predict_mu_sig, loss_fn, lr, n_epochs=100, debug=False, name=''):
+def simple_train(model, trainloader, loss_fn, lr, n_epochs=100, debug=False, name=''):
   
-  print(f'Training {name}')
+  predict_mu_sig = True if loss_fn in ['GaussNd', 'Navarro', 'Navarro2'] else False
+  loss_func = get_loss_func(loss_fn)
+
   optimizer = torch.optim.SGD(model.parameters(), lr=lr)
   model.train()
   for e in range(n_epochs):
@@ -286,20 +289,21 @@ def simple_train(model, trainloader, predict_mu_sig, loss_fn, lr, n_epochs=100, 
       if predict_mu_sig:
         if debug: print(f"{i}"); i+=1
         muhat, sighat = model(x)
-        loss, _, _ = loss_fn(muhat, y, sighat)
+        loss, _, _ = loss_func(muhat, y, sighat)
         loss.backward()
         nn.utils.clip_grad_value_(model.parameters(), clip_value=0.5)
         optimizer.step()
         tot_loss += loss.item()
       else: 
         yhat = model(x)
-        loss = loss_fn(yhat, y)
+        loss = loss_func(yhat, y)
         loss.backward()
         optimizer.step()
         tot_loss += loss.item()
 
     #print(f'[Epoch {e + 1}] avg loss: {np.round(tot_loss/len(trainloader),5)}')
-    print(f'  Epoch {e + 1}', end="\r")
+    print(f'    Epoch {e + 1}', end="\r")
+print("")
 
 
 # Test simple model
@@ -308,7 +312,6 @@ def simple_test(loader, model, get_var):
     Returns targets and predictions
     '''
 
-    print('Testing')
     ys, yhats, vars, xs, = [],[], [], []  # add option to return xs
     model.eval()
     with torch.no_grad():
@@ -426,55 +429,63 @@ class CPU_Unpickler(pickle.Unpickler):
             return super().find_class(module, name)
 
 
-def get_modelsDF(taskdir):
+def get_modelsDF(taskdir, dataset):
 
-    # Create dict
-    models_list = ['MLP1', 'MLP2', 'MLP3'] + [exp for exp in os.listdir(taskdir) if os.path.isdir(os.path.join(taskdir, exp)) and exp.startswith('e') and exp not in ['exp_tiny', 'exp1']]
+    # Get list of models (experiments) and FHO models
+    models_list = [exp for exp in os.listdir(taskdir) if os.path.isdir(os.path.join(taskdir, exp)) and exp.startswith('e') and exp not in ['exp_tiny', 'exp1']]
+    models_list += [exp.replace('.pt','') for exp in os.listdir(f"{taskdir}/FHO/") if exp.endswith('.pt')]
     all_info = []
 
-    # Fill with models 
+    # Create dict of model information (for models with desired dataset)
     for model in models_list:
-        if 'MLP' in model: 
-            resfile = f'{taskdir}/MLP/{model}_testres.pkl'
-            config = json.load(open(f'{taskdir}/MLP/{model}_config.json', 'rb'))
+
+        # Get config and results files
+        if 'FHO' in model: 
+            resfile = f'{taskdir}/FHO/{model}_testres.pkl'
+            config = json.load(open(f'{taskdir}/FHO/{model}_config.json', 'rb'))
         else: 
             resfile = osp.join(taskdir, model, 'testres.pkl')
             config = json.load(open(osp.join(taskdir, model, 'expfile.json'), 'rb'))
-            try: 
-                train_results = CPU_Unpickler(open(osp.join(taskdir, model, 'result_dict.pkl'), 'rb')).load()
-            except FileNotFoundError:
-                print(f"Ignoreing {model} (has no result_dict.pkl)")
-                continue
+
+        # If this is a completed model, load results, and if this is a dist model, re-compute metrics for a bunch of samples of the distribution and get average
+        if not osp.exists(resfile):
+            print(f"Skipping {model} no test results file found")
+            continue
         testys, testpreds, test_results = pickle.load(open(resfile, 'rb'))
-        if len(testpreds) ==2 :
+        if len(testpreds) ==2: 
             avg_samp_res = data_utils.get_avg_samp_res(testys, testpreds, n_samples=10)
+
+        # Add to dict 
         vol = config['data_params']['data_path'].replace('~/ceph/Data/','')[:-1]
-        ds = config['data_params']['data_file'].replace('.pkl','')
-        info = {'exp': model, 
-                'rho': np.round(np.mean(test_results['rho']),2), # mean over all targets
-                'avg samp rho': np.round(np.mean(avg_samp_res['rho']),2) if len(testpreds)==2 else '', # mean over all targets
-                'rmse': np.round(np.mean(test_results['rmse']),2), # mean over all targets
-                'avg samp rmse': np.round(np.mean(avg_samp_res['rmse']),2) if len(testpreds)==2 else '', # mean over all targets
-                'R2': np.round(np.mean(test_results['R2']),2), # mean over all targets, 
-                'avg samp R2': np.round(np.mean(avg_samp_res['R2']),2) if len(testpreds)==2 else '', # mean over all targets
-                'bias': np.round(np.mean(test_results['bias']),2), # mean over all targets
-                'avg samp bais': np.round(np.mean(avg_samp_res['bias']),2) if len(testpreds)==2 else '', # mean over all targets
-                #'val rmse': np.round(np.mean(train_results['val rmse final test']),2) if not 'MLP' in model else '', 
-                'loss func': config['run_params']['loss_func'], 
-                'n epochs': config['run_params']['n_epochs'], 
-                'feats' : config['data_params']['use_feats'], 
-                'targs': config['data_params']['use_targs'], 
-                'DS': f'{vol}, {ds}'
-                }
-        all_info.append(info)
+        datafile = config['data_params']['data_file']
+        ds = datafile[:3]
+        if ds == dataset:
+            info = {'exp': model, 
+                    'rho': np.round(np.mean(test_results['rho']),2), # mean over all targets
+                    'avg samp rho': np.round(np.mean(avg_samp_res['rho']),2) if len(testpreds)==2 else '', # mean over all targets
+                    'rmse': np.round(np.mean(test_results['rmse']),2), # mean over all targets
+                    'avg samp rmse': np.round(np.mean(avg_samp_res['rmse']),2) if len(testpreds)==2 else '', # mean over all targets
+                    'R2': np.round(np.mean(test_results['R2']),2), # mean over all targets, 
+                    'avg samp R2': np.round(np.mean(avg_samp_res['R2']),2) if len(testpreds)==2 else '', # mean over all targets
+                    'bias': np.round(np.mean(test_results['bias']),2), # mean over all targets
+                    'avg samp bais': np.round(np.mean(avg_samp_res['bias']),2) if len(testpreds)==2 else '', # mean over all targets
+                    #'val rmse': np.round(np.mean(train_results['val rmse final test']),2) if not 'FHO' in model else '', 
+                    'loss func': config['run_params']['loss_func'], 
+                    'n epochs': config['run_params']['n_epochs'], 
+                    'feats' : config['data_params']['use_feats'], 
+                    #'targs': config['data_params']['use_targs'], 
+                    'DS': f'{vol}, {ds}'
+                    }
+            all_info.append(info)
 
-        models = pd.DataFrame.from_dict(all_info)   
-        models['abs bias'] = np.abs(models['bias']) 
-        models = models.sort_values(by=['rho', 'rmse', 'R2', 'abs bias'], ascending=[False, True, False, False])
-        models.drop(columns=['abs bias'], inplace=True)
+    # Make into DF and sort
+    models = pd.DataFrame.from_dict(all_info)   
+    models['abs bias'] = np.abs(models['bias']) 
+    models = models.sort_values(by=['rho', 'rmse', 'R2', 'abs bias'], ascending=[False, True, False, False])
+    models.drop(columns=['abs bias'], inplace=True)
 
 
-        return models
+    return models
 
 # def get_modelsDF(taskdir):
 
@@ -580,29 +591,144 @@ def MMD(x, y, kernel):
 For runnng sweeps
 '''
 
-def get_swp_num(out_pointer):
+def run_sweep_proc(paramdicts, sweep_dir, proc_num):
 
-    swp_nums = [f[f.find('_')+1:f.find('_')+1+f[f.find('_')+1:].find('_')]  for f in os.listdir(out_pointer) if 'res' in f]   # all numeric ids already created for this sweep
-    if len(swp_nums)==0:
-        swp_num = '0'
-    else:
-        swp_num = int(swp_nums[-1]) + 1
+    # Loop over param sets
+    count = 0
+    print(f"[proc {proc_num}] Starting loop over {len(paramdicts)} parameter sets.")     
+    for d in paramdicts:
+
+        # # Create downsized dict that will be what is saved to done experiments file
+        # save_dict = {}
+        # save_dict['run_params'] = dict['run_params']
+        # save_dict['learn_params'] = dict['learn_params']
+        # save_dict['hyper_params'] = dict['hyper_params']
+
+        # Check if this experiment has already been done
+        exp_id = d['exp_id']
+        done_exps = [f.replace('_model_best.pt','') for f in os.listdir(sweep_dir) if f.endswith('model_best.pt')]
+        if exp_id in done_exps:
+            print(f"[proc {proc_num}] Skipping experiment {exp_id} ({exp_id}_model_best.pt already exists in {sweep_dir})")
+            continue
+        
+        # Set unique experiment ID
+        print(f"[proc {proc_num}] SETTING UP EXPERIMENT {exp_id} with the following parameters -> {d}")
+
+        # Train and save trained model results to temporary output directory 
+        try:
+            train_script.run(d['run_params'], d['data_params'], d['learn_params'], d['hyper_params'], sweep_dir, exp_id, gpu=True, low_output=True, proc=proc_num)
+        except Exception as e:
+            return e
+        count += 1
+        
+        # # Save experiment results dict to this thread's temporary results file
+        # if not osp.exists(results_file_proc):
+        #     pickle.dump({expid: result_dict}, open(results_file_proc, 'wb'))
+        # results_proc = pickle.load(open(results_file_proc, 'rb'))
+        # results_proc.update({expid: result_dict})
+        # pickle.dump(results_proc, open(results_proc, 'wb')) # open file twice to ensure overwrite
+       
+        # # Save experiment config dict to this thread's temporary done experiments file
+        # if not osp.exists(configs_file_proc):
+        #     json.dump({expid: save_dict}, open(configs_file_proc, 'wb'))
+        # done_exps_proc = json.load(open(configs_file_proc, 'rb'))
+        # done_exps_proc.update({expid: save_dict})
+        # json.dump(done_exps_proc, open(configs_file_proc, 'wb')) # open file twice to ensure overwrite
+        print(f'[proc {proc_num}] Done with {exp_id} [{count}/{len(paramdicts)}]\n')
+
+    print(f"[proc {proc_num}] Done with all {len(paramdicts)} parameter sets.")
+
     
-    return swp_num
 
-def make_info_dict(basedict, diffdict):
 
-    info_dict = basedict.copy()
-    for pkey in basedict.keys():
-        for key in basedict[pkey].keys():
-            info_dict[pkey][key] = diffdict[key]
+# def move_thread_outputs(procs_outdir, sweep_dir):
+#     '''
+#     Move the configs, trained modls, and results files from the temporary threads directory into the sweep folder
+#     Replace the exp ids with the next available unique id
+#     '''
+
+#     print(f"Collecting experiment dicts, trained models, and results from all threads in {procs_outdir} and moving to {sweep_dir}", flush=True)
+
+#     # If there are already some done experiments, find the next exp number
+#     used_exp_ids = [f.replace('model_best.pt','')for f in os.listdir(sweep_dir) if f.endswith('model_best.pt')]
+#     used_exp_nums = [int(id.replace('exp','')) for id in used_exp_ids]
+#     if len(used_exp_nums) > 0:
+#         new_num = "{:03d}".format(np.max(used_exp_nums) + 1) 
+#     else:
+#         new_num = '000'
+
+#     # Loop over all experiments done by this sweep, find new unique exp id, and move the config, trained model, and results files out of the procs_temp directory
+#     swept_exp_ids = [f.replace('model_best.pt','') for f in os.listdir(procs_outdir) if f.endswith('model_best.pt')]
+#     for exp_id in swept_exp_ids:
+#         new_id = f"exp{new_num}"
+#         shutil.copy(f"{procs_outdir}/{exp_id}_model_best.pt", f"{sweep_dir}/{new_id}_model_best.pt")
+#         shutil.copy(f"{procs_outdir}/{exp_id}_config.json", f"{sweep_dir}/{new_id}_config.json")
+#         shutil.copy(f"{procs_outdir}/{exp_id}_result_dict.pkl", f"{sweep_dir}/{new_id}_result_dict.pkl")
+#         new_num = "{:03d}".format(int(new_num) + 1) # increment new_num
+
+#     ## Delete temporary procs_outdir
+#     # os.remove(procs_outdir)
+
+#     return 
+
+# def get_swp_num(configs_file):
+
+#     done_exps = json.load(open(configs_file, 'rb')) # dict of {exp_id: {dict}} for all done experiments
+#     used_nums =  [int(n[-3:]) for n in list(done_exps.keys())]  # all numeric ids already created for this sweep
+#     if len(used_nums)==0:
+#         swp_num = '000'
+#     else:
+#         swp_num = "{:03d}".format(np.max(used_nums) + 1) 
+    
+#     return swp_num
+
+# def make_info_dict(basedict, diffdict):
+
+#     info_dict = basedict.copy()
+#     for pkey in basedict.keys():
+#         for key in basedict[pkey].keys():
+#             info_dict[pkey][key] = diffdict[key]
             
-    return info_dict
+#     return info_dict
 
-def find_next_exp(out_pointer, donefile, sets):
+# def check_done(save_dict, configs_file):
 
-    raise NotImplementedError
+#     if not osp.exists(configs_file): # if configs file not yet create, no experiments have been done
+#         done = False
+#     else:
+#         done_exps = json.load(open(configs_file, 'rb'))
+#         done = save_dict in list(done_exps.values()) # done_exps.values() is list of exp dicts
 
+#     return done
+
+def perms(diffs):
+    '''
+    From Christian
+    Makes permutations of dict of lists very fast
+    '''
+    from itertools import product
+
+    keys=list(diffs.keys())
+    val=list(diffs.values())
+    for i, s in enumerate(val):
+        if i==0:
+            a=val[0]
+        else:
+            a=product(a, val[i])
+    bs=[]
+    for b in a:
+        bs.append(b)
+    output=[]
+    def removeNestings(l):
+        for i in l:
+            if type(i) == tuple:
+                removeNestings(i)
+            else:
+                output.append(i)
+    removeNestings(bs)
+    perms=np.array(output)
+
+    return perms.reshape(-1, len(keys))
 
 '''
 NOT USED
@@ -630,26 +756,3 @@ def clean_done(folder):
         os.mkdir(experiment_folder)
     print('Cleaned done folder')
 
-##makes permutations of dict of lists very fast
-def perms(diffs):
-    from itertools import product
-    keys=list(diffs.keys())
-    val=list(diffs.values())
-    for i, s in enumerate(val):
-        if i==0:
-            a=val[0]
-        else:
-            a=product(a, val[i])
-    bs=[]
-    for b in a:
-        bs.append(b)
-    output=[]
-    def removeNestings(l):
-        for i in l:
-            if type(i) == tuple:
-                removeNestings(i)
-            else:
-                output.append(i)
-    removeNestings(bs)
-    perms=np.array(output)
-    return perms.reshape(-1, len(keys))
