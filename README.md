@@ -11,5 +11,4 @@ Merger histories are encoded intuitively as graph-like structure, and graph nuer
 ## References
 
 <a id="1">[1]</a> 
-Jesperson, C. (2017). 
 Jespersen, C. K., Cranmer, M., Melchior, P., et al. 2022, The Astrophysical Journal, 941, 7.
