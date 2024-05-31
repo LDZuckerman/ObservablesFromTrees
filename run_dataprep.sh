@@ -34,5 +34,5 @@ srun python ObservablesFromTrees/run_dataprep.py -DS_name $DS_name -tng_vol $tng
 
 
 ####
-# In parent directory of ObservablesFromTrees, run 'sbatch ObservablesFromTrees/run_dataprep.sh -n DS2 -v 100 -s None -r 100 -d 4 -m True'
+# In parent directory of ObservablesFromTrees, run 'sbatch ObservablesFromTrees/run_dataprep.sh -n DS2 -v 100 -s None -r 100 -d 7 -m True -p True'
 ####
