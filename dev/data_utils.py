@@ -34,7 +34,12 @@ except ModuleNotFoundError:
 
 # Make dictionary of (cm_ID, tree DF) for all trees
 def prep_trees(ctrees_path, featnames, phot_ids, metafile, savefile, zcut=('before', np.inf), Mlim=10, sizelim=np.inf, tinytest=False, downsize_method='', multi=False, check_gain_with='prog'): 
-
+    '''
+    PROPBABLY SHOULD UPDATE THIS TO:
+        1. Store 
+    '''
+    
+    
     # Prepare to load tree data 
     tree_path = osp.expanduser(ctrees_path)
     #loadcols = [allnames.index(name) for name in allnames if name not in ignorenames] # col idxs to load (remove ignorenames)
@@ -1346,35 +1351,34 @@ def check_tree(tree, num, print_good=False):
     if print_good: print('Downsized tree passed all tests')
 
 
-####################
-# Debuging functions
-####################
+########################
+# Sanity check functions
+########################
 
-def combine_mstar_mhaloz0_mag(dataset):
+def combine_all_data(dataset):
     '''
     For DS2, for which I made allprops analogous to allobs
-    Output is same as props graphs, except instead of [tree, props] just [mhaloz0, mstar + phot], and stored in DF
+    Output is same as props graphs, except instead of [tree, props] just [mhaloz0, props, phot], and stored in DF
     '''
 
     alltrees = pickle.load(open(osp.expanduser(dataset.replace('.pkl','_alltrees.pkl')), 'rb'))
     allprops = pickle.load(open(osp.expanduser(dataset.replace('.pkl','_allprops.pkl')), 'rb'))
     allphot = pickle.load(open(osp.expanduser(dataset.replace('.pkl','_allphot.pkl')), 'rb'))
-    prop_label_names = ['SubhaloBHMass', 'SubhaloBHMdot','SubhaloGasMetallicity','SubhaloHalfmassRad','SubhaloMass','SubhaloGasMass','SubhaloStelMass','SubhaloSFR','SubhaloStarMetallicity','SubhaloVelDisp','SubhaloVmax','SubhaloRes'] # Why is props meta and phot meta not saved seperately in meta??? instead its still just obs meta which is phot meta
-    mstar_idx = prop_label_names.index('SubhaloStelMass')
 
-    mass_info = pd.DataFrame(columns=['rstar_id', 'mstar', 'mhaloz0', 'umag', 'vmag'])
+    info = pd.DataFrame(columns=['rstar_id', 'mhaloz0', 'tree_len' ,'props', 'phot'])
     for id in alltrees.keys():
+        # Info from tree
         mhaloz0 = alltrees[id].loc[0]['Mvir(10)']
-        mstar = allprops[id][mstar_idx]
-        Umag = allphot[id][0]
-        Vmag = allphot[id][2]
-        mass_info.loc[len(mass_info)] = {'rstar_id': id, 'mstar': mstar, 'mhaloz0': mhaloz0, 'umag': Umag, 'vmag': Vmag}
+        tree_len = len(alltrees[id])
+        # Info from SF
+        props = allprops[id] # mstar = allprops[id][mstar_idx]
+        phot = allphot[id] # Umag = allphot[id][0]; Vmag = allphot[id][2]
+        # Combine
+        info.loc[len(info)] = {'rstar_id': id, 'mhaloz0': mhaloz0, 'tree_len': tree_len ,'props': props, 'phot': phot} #'umag': Umag, 'vmag': Vmag}
 
-    pickle.dump(mass_info, open(dataset.replace('.pkl','_mass_imag_nfo.pkl'), 'wb'))
+    pickle.dump(info, open(dataset.replace('.pkl','_all_data_combined.pkl'), 'wb'))
 
-    print("Done")
-
-    return mass_info
+    return info
 
 
 def prep_mstar(obscat_path, volname, save_path):
@@ -1549,9 +1553,17 @@ def create_subset(data_params, return_set, save_extras=True):
 
     # Split trainval into train and val [MAYBE I SHOULD BE RANDOMIZING THIS]
     print(f"   Splitting train/val into train and val", flush=True)
-    val_pct = splits[1]/(splits[0]+splits[1]) # pct of train
-    train_out = trainval_out[:int(len(trainval_out)*(1-val_pct))]
-    val_out = trainval_out[int(len(trainval_out)*(val_pct)):]
+    val_pct = splits[1]/(splits[0]+splits[1]) # pct of train from total percents [70, 10, 20]
+    # train_out = trainval_out[:int(len(trainval_out)*(1-val_pct))]
+    # val_out = trainval_out[int(len(trainval_out)*(val_pct)):]
+    val_idxs = np.random.choice(len(trainval_out), int(len(trainval_out)*val_pct), replace=False) #trn_idxs = [i for i in range(len(trainval_X)) if i not in val_idxs]
+    train_out, val_out = [], []
+    for i in range(len(trainval_out)):
+        if i in val_idxs:
+            val_out.append(trainval_out[i])
+        else:
+            train_out.append(trainval_out[i])
+    print(f"   Train set has {len(train_out)} graphs, Val set has {len(val_out)} graphs, Test set has {len(test_out)} graphs", flush=True)
 
     # Save (seperately for train and test to aviod any mistakes!)
     tag = f"{targ_type}_{use_featidxs}_{use_targidxs}_{transfname}_{splits}"
@@ -1600,6 +1612,8 @@ def get_subset_path(data_params, set):
 # Helper function to read meta file regardless of dict positions (e.g. works for datasets with and without props meta)
 def read_data_meta(metafile, targ_type):
 
+    if targ_type == 'samProps': targ_type = 'targ'
+
     data_meta = json.load(open(metafile, 'rb'))
     tree_idx = np.where(np.array([list(data_meta[i].keys())[0] for i in range(len(data_meta))]) == f'tree meta')[0][0]
     targs_idx = np.where(np.array([list(data_meta[i].keys())[0] for i in range(len(data_meta))]) == f'{targ_type} meta')[0][0]
@@ -1644,16 +1658,31 @@ class SimpleData(Dataset_notgeom):
   
   def __len__(self):
     return self.len
+# class SimpleData(Dataset_notgeom):
 
-def data_finalhalos(datapath, dataset, targ_type, use_feats, use_targs): 
+#   def __init__(self, x, y):
+#     self.x = x
+#     self.y = y
+#     self.len = len(x)
+  
+#   def __getitem__(self, index):
+#     return self.x[index], self.y[index]
+  
+#   def __len__(self):
+#     return self.len
 
-    # Load
-    graph_file = f"{datapath}/{dataset}_{targ_type}_final.pkl"
-    traintransf_file = f"{datapath}/{dataset}_QuantileTransformer_train.pkl" # SHOULD REALLY BE USING SEPERATE TRANSFORMERS FOR TRAIN AND TEST BUT ACCIDENTALLY DIDNT SAVE TEST ONE YET
+def data_finalhalos(datapath, dataset, targ_type, use_feats, use_targs, savepath):
+
+    # Load data, testidxs, and transforms
+    if not 'sam' in targ_type:
+        datafile = f"{datapath}/{dataset}_{targ_type}_final.pkl"
+        ft_train = pickle.load(open(f"{datapath}/{dataset}_QuantileTransformer_train.pkl" , 'rb'))
+        ft_test = pickle.load(open(f"{datapath}/{dataset}_QuantileTransformer_test.pkl" , 'rb'))
+    else: 
+        datafile = f"{datapath}/{dataset}.pkl" # for now, not transforming sam data 
     testidx_file = f'{datapath}/{dataset}_testidx20.npy' # probably unlikely I'll change split
-    print(f"  Loading graphs from {graph_file}, transformer from  {traintransf_file}")
-    allgraphs = pickle.load(open(graph_file, 'rb'))
-    ft_train = pickle.load(open(traintransf_file, 'rb')) 
+    print(f"  Loading full dataset from {datafile}, corresponding test idxs file, and train and test transformers")
+    data = pickle.load(open(datafile, 'rb')) # graphs
 
     # Get features and targs to use
     _, tree_meta, phot_meta, _ = read_data_meta(f"{datapath}/{dataset}_meta.json", targ_type)
@@ -1661,32 +1690,112 @@ def data_finalhalos(datapath, dataset, targ_type, use_feats, use_targs):
     all_featnames = tree_meta['featnames']
     use_targidxs = [all_labelnames.index(t) for t in all_labelnames if t in use_targs] 
     use_featidxs = [all_featnames.index(f) for f in all_featnames if f in use_feats]
+    print(f"  Using feats {use_feats} (idxs {use_featidxs})")
     
-    # Fill X and Y
-    X = []; Y = []
-    for graph in allgraphs:
-        x = np.expand_dims(graph.x[0].detach().numpy(), axis=0)
-        x = ft_train.transform(x).squeeze()
-        X.append(x[use_featidxs].astype(np.float32))
-        Y.append(graph.y[use_targidxs].detach().numpy().astype(np.float32))
+    # # Transform and remove unwanted features and targets
+    # X = []; Y = []
+    # for graph in allgraphs:
+    #     x = np.expand_dims(graph.x[0].detach().numpy(), axis=0)
+    #     if not 'sam' in targ_type: x = ft_train.transform(x).squeeze() # for now, not transforming sam data 
+    #     else: x = x.squeeze()
+    #     X.append(x[use_featidxs].astype(np.float32))
+    #     Y.append(graph.y[use_targidxs].detach().numpy().astype(np.float32))
     
-    # Split into train and test
+    # # Split into trainval and test
+    # print(f'  Loading test indices from {testidx_file}', flush=True)
+    # testidx = np.array(np.load(testidx_file))
+    # X_trainval, X_test = [], []
+    # Y_trainval, Y_test = [], []
+    # for i in range(len(X)):
+    #     if i in testidx:
+    #         X_test.append(X[i])
+    #         Y_test.append(Y[i])
+    #     else:
+    #         X_trainval.append(X[i])
+    #         Y_trainval.append(Y[i])
+
+    # Split into trainval and test
     print(f'  Loading test indices from {testidx_file}', flush=True)
     testidx = np.array(np.load(testidx_file))
-    X_train, Y_train = [], []
-    X_test, Y_test = [], []
-    for i in range(len(X)):
+    test_data = []
+    trainval_data = [] 
+    for i, d in enumerate(data):
         if i in testidx:
-            X_test.append(X[i])
-            Y_test.append(Y[i])
+            test_data.append(d)
         else:
-            X_train.append(X[i])
-            Y_train.append(Y[i])
+            trainval_data.append(d)
 
-    traindata = SimpleData(X_train, Y_train)
-    testdata = SimpleData(X_test, Y_test)
+    # Transform each graph, and remove unwanted features and targets
+    print(f"   Selecting desired features {use_feats} and targets {use_targs}", flush=True)
+    trainval_X, trainval_Y = [], []
+    for graph in trainval_data:
+        x = graph.x 
+        if not 'sam' in targ_type: # for now, not transforming sam data 
+            x = ft_train.transform(x)
+        trainval_X.append(torch.tensor(x[:, use_featidxs].astype(np.float32))[0]) # [0] for final halo
+        trainval_Y.append(graph.y[use_targidxs])
+    test_X, test_Y = [], []
+    for graph in test_data:
+        x = graph.x
+        if not 'sam' in targ_type: # for now, not transforming sam data 
+            x = ft_test.transform(x)
+        test_X.append(torch.tensor(x[:, use_featidxs].astype(np.float32))[0]) # [0] for final halo
+        test_Y.append(graph.y[use_targidxs])
+            
+    # # Transform each graph, and remove unwanted features and targets
+    # print(f"   Selecting desired features {use_feats} and targets {use_targs}", flush=True)
+    # trainval_X, trainval_Y = [], []
+    # for graph in trainval_data:
+    #     x = graph.x
+    #     if not 'sam' in targ_type: # for now, not transforming sam data 
+    #         x = ft_train.transform(x)
+    #     trainval_X.append(torch.tensor(x[:, use_featidxs]))
+    #     trainval_Y.append(graph.y[use_targidxs])
+    # test_X, test_Y = [], []
+    # for graph in test_data:
+    #     x = graph.x
+    #     if not 'sam' in targ_type: # for now, not transforming sam data 
+    #         x = ft_test.transform(x)
+    #     trainval_X.append(torch.tensor(x[:, use_featidxs]))
+    #     trainval_Y.append(graph.y[use_targidxs])
+
+    # Split trainval into train and val 
+    print(f"   Splitting train/val into train and val", flush=True)
+    val_pct = 10/(10+70) 
+    # train_X = trainval_X[:int(len(trainval_X)*(1-val_pct))]
+    # train_Y = trainval_Y[:int(len(trainval_Y)*(1-val_pct))]
+    # val_X = trainval_X[int(len(trainval_X)*(val_pct)):]
+    # val_Y = trainval_Y[int(len(trainval_Y)*(val_pct)):]
+    val_idxs = np.random.choice(len(trainval_X), int(len(trainval_X)*val_pct), replace=False) #trn_idxs = [i for i in range(len(trainval_X)) if i not in val_idxs]
+    train_X, train_Y, val_X, val_Y = [], [], [], []
+    for i in range(len(trainval_data)):
+        if i in val_idxs:
+            val_X.append(trainval_X[i])
+            val_Y.append(trainval_Y[i])
+        else:
+            train_X.append(trainval_X[i])
+            train_Y.append(trainval_Y[i])
+
+    # # Save (seperately for train and test to aviod any mistakes!)
+    # tag = f"{targ_type}_{use_featidxs}_{use_targidxs}_{transfname}_{splits}"
+    # train_path = osp.expanduser(f'{data_path}/{dataset}_subsets/{dataset}_{tag}_train.pkl') 
+    # test_path = osp.expanduser(f'{data_path}/{dataset}_subsets/{dataset}_{tag}_test.pkl') 
+    # print(f"   Saving train+val sub-dataset as {train_path}", flush=True)
+    # print(f"   Saving test sub-dataset as {test_path}", flush=True)
+    # pickle.dump((train_out, val_out), open(train_path, 'wb'))
+    # if save_extras:
+    #     pickle.dump((test_out, test_z0x_all), open(test_path, 'wb')) # also save z0 feats for all test halos, for future exploration
+    # else: pickle.dump(test_out, open(test_path, 'wb')) 
+
+    traindata = SimpleData(train_X, train_Y)
+    valdata = SimpleData(val_X, val_Y)
+    testdata = SimpleData(test_X, test_Y)
+
+    #pickle.dump((train_X, train_Y, val_X, val_Y,test_X, test_Y), open(savepath.replace('.pkl', '_seperate.pkl'), 'wb'))
+    pickle.dump((traindata, valdata, testdata), open(f'{savepath}', 'wb')) 
   
-    return traindata, testdata
+    return 
+
 
 def data_fake(n=20000): 
     
@@ -1701,7 +1810,7 @@ def data_fake(n=20000):
   
     return traindata, testdata
 
-def propsdata_finalhalos(props_data, use_featidxs, use_targidxs):
+def sampropsdata_finalhalos(props_data, use_featidxs, use_targidxs):
 
     X = []; Y = []
     for graph in props_data:
@@ -1714,11 +1823,11 @@ def propsdata_finalhalos(props_data, use_featidxs, use_targidxs):
     return traindata, testdata
 
 
-def get_yhats(preds, sample_method=None):
+def get_yhats(preds, sample_method='large_sample', N=100):
     '''
     Get point estimates from predictions
         If predictions are single array of predicted means, return that array 
-        If predictions are a tuple of arrays of predicted means and stds
+        If predictions are a tuple of arrays of predicted means and SDs (not log SDs - already exponentiated)
             If 'method' == 'single', return a single sample from the predicted distribution of each observation
             If 'method' == 'average', return average of a 1000 samples from the predicted distribution of each observation (which is sort of just a point estimate for the mean, as N->large)
             If 'method' == 'large_sample', return 1000 samples from the predicted distribution of each observation
@@ -1727,46 +1836,66 @@ def get_yhats(preds, sample_method=None):
     if len(preds) == 2: 
         muhats = preds[0]
 
-        if sample_method == None:
+        if sample_method == 'no_sample':
             yhats = muhats
 
         else:
             sigmahats = preds[1]
 
             if sample_method == 'single': 
-                yhats = np.random.normal(muhats, sigmahats)
+                yhats = np.random.normal(muhats, sigmahats) 
                 
             else:
-                y_samples = [np.random.normal(muhats, sigmahats) for i in range(1000)]
+                y_samples = [np.random.normal(muhats, sigmahats) for i in range(N)]
 
                 if sample_method == 'average':
                     yhats = np.mean(y_samples, axis=0)
                 elif sample_method == 'large_sample':
-                    yhats = y_samples
-                else: raise ValueError('method must be single, average, or large_sample')  
+                    yhats = np.array(y_samples)
+
+                else: raise ValueError(f'method must be no_sample, single, average, or large_sample not {sample_method}')  
 
     else: 
         yhats = preds
 
     return yhats
 
-def get_avg_samp_res(ys, preds, n_samples):
+def flatten_sampled_yhats(yhats, ys):
+    '''
+    If yhats represent N samples from each distribution, create flattened yhats and corresponding ys vectors
+    '''
+
+    N = yhats.shape[0] # number of samples per observation
+    p = yhats.shape[1] # number of observations
+    q = yhats.shape[2] # number of targets
+    if p < N < q:
+        raise ValueError('Check the shape of yhats. Should be (n samples per observation, n observations, n targets)')
+    yhat_samples_flat = np.zeros((N*p,q))
+    y_samples_flat = np.zeros((N*p,q))
+    for i in range(len(yhats)):
+        yhat_samples_flat[i*p:(i+1)*p] = yhats[i]
+        y_samples_flat[i*p:(i+1)*p] = ys
+
+    return np.squeeze(yhat_samples_flat), np.squeeze(y_samples_flat)
+
+def sample_results(ys, preds, n_samples):
 
     if len(preds) != 2: 
         raise ValueError('Doesnt look like predictions are from a distribution-predicing model')
     muhats = preds[0]
     sigmahats = preds[1]
-    rhos =[]; rmses = []; R2s = []; biases = []
+    rhos =[]; rmses = []; R2s = []; biases = []; scatters = []
     for n in range(n_samples):
-        yhats = np.random.normal(muhats, sigmahats)
+        yhats = np.random.normal(muhats, sigmahats) # pt estimate from each predicted distribution for each target
         rmses.append(np.std(yhats - ys, axis=0)) # RMSE for each targ
         rhos.append(np.array([stats.pearsonr(ys[:,i], yhats[:,i]).statistic for i in range(ys.shape[1])])) # Pearson R for each targ
         R2s.append(np.array([skmetrics.r2_score(ys[:,i], yhats[:,i]) for i in range(ys.shape[1])])) # coefficient of determination
-        biases.append(np.mean(ys-yhats, axis=0))
+        biases.append(np.mean(ys-yhats, axis=0))  # mean of the residuals
+        scatters.append(np.std(ys-yhats, axis=0)) # SD of the residuals
 
-    res = {'rho':np.mean(rhos, axis=0), # mean over all samples
-           'rmse':np.mean(rmses, axis=0), # mean over all samples
-           'R2':np.mean(R2s, axis=0), # mean over all samples
-           'bias':np.mean(biases, axis=0)} # mean over all samples
+    # res = {'rho':np.mean(rhos, axis=0), # mean over all samples
+    #        'rmse':np.mean(rmses, axis=0), # mean over all samples
+    #        'R2':np.mean(R2s, axis=0), # mean over all samples
+    #        'bias':np.mean(biases, axis=0)} # mean over all samples
 
-    return res
+    return rhos, rmses, R2s, biases, scatters
