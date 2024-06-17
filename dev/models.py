@@ -1,11 +1,20 @@
-from pickle import FALSE
 import torch.nn.functional as F
 import torch
 from torch import nn
 from torch.nn import Linear, LayerNorm, LeakyReLU, Module, ReLU, Sequential, ModuleList
 from torch_geometric.nn import SAGEConv, global_mean_pool, norm, global_max_pool, global_add_pool, MetaLayer
 from torch_scatter import scatter_mean, scatter_sum, scatter_max, scatter_min, scatter_add
-from torch import cat, square,zeros, clone, abs, sigmoid, float32, tanh, clamp
+from torch import cat, square,zeros, clone, abs, sigmoid, float32, tanh, clamp, log
+import sys
+try: 
+    from dev import run_utils
+except ModuleNotFoundError:
+    try:
+        sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
+        from ObservablesFromTrees.dev import run_utils
+    except ModuleNotFoundError:
+        sys.path.insert(0, 'ObservablesFromTrees/dev/')
+        from dev import run_utils
 
 class MLP(Module):
     def __init__(self, n_in, n_out, hidden=64, nlayers=2, layer_norm=True):
@@ -75,9 +84,9 @@ class Sage(Module):
             self.decoders.append(self.decoder)
             self.norms.append(self.norm)
 
-        ###################
-        # Variance Layers #
-        ###################
+        #############################
+        # Standard deviation Layers #
+        #############################
 
         if self.predict_sig:
             self.sigs = ModuleList()
@@ -174,15 +183,14 @@ class Sage(Module):
         
         # variance
         if self.predict_sig:
-            sig=[]
+            logsig=[]
             for norm, decode in zip(self.sig_norms, self.sigs):
                 x1=clone(x)
                 for n, d in zip(norm, decode):
                     x1=d(n(x1))
                     x1=self.decode_act(x1) ##note that these are LeakyReLU and should continue as such, otherwise you have to remove them from the last layer
-                sig.append(x1)
-
-            sig=abs(cat(sig, dim=1)) # calls this alternatively std and var... which is better to use? 
+                logsig.append(x1)
+            logsig=cat(logsig, dim=1) # DONT TAKE ABS, INSTEAD ASSUME PREDICTION IS OF LOG SIGMA, TAKE EXP OF MODEL PREDICTION
 
         # if self.predict_cov:
         #     rho=[]
@@ -197,10 +205,7 @@ class Sage(Module):
         #     cov = clamp(tanh(cov), min=-0.999, max=0.999)
         
         if self.predict_sig:
-            # if self.predict_rho:
-            #     return x_out, sig, clamp(tanh(rho), min=-0.999, max=0.999) #stability
-            # else:
-                return x_out, sig
+            return x_out, logsig
         if self.predict_cov:
             return x_out, cov
         else:
@@ -1127,8 +1132,8 @@ class MetaEdge(Module):
                     x1=d(n(x1))
                     x1=self.decode_act(x1)
                 sig.append(x1)
-            sig=abs(cat(sig, dim=1))
-
+            sig=cat(sig, dim=1) # DONT TAKE ABS, INSTEAD ASSUM PREDICTION IS OF LOG SIGMA, TAKE EXP OF MODEL PREDICTION
+            
         if self.rho!=0:
             rho=[]
             for norm, decode in zip(self.rho_norms, self.rhos):
@@ -1137,7 +1142,7 @@ class MetaEdge(Module):
                     x1=d(n(x1))
                     x1=self.decode_act(x1)
                 rho.append(x1)
-            rho=abs(cat(rho, dim=1)) ### not sure this works with only 1d
+            rho=cat(rho, dim=1)
         
         if self.variance:
             if self.rho!=0:
@@ -1165,33 +1170,34 @@ class SimpleNet(nn.Module):
 
 ############################
 # Simple model for predicting target distributions from ONLY final halo properties
-# Make sure sigmas end with act func that makes them allways positive
+# EITHER make sure sigmas end with act func that makes them allways positive OR (better) interpret as log sigmas
 # Why do sigmas go to nan?
 #   Outputs of first linear get very large, which means sigmoid of them is always ~1 (would be the same for tanh)
-#   But I can't just scale them to [0, 1] or something becasue sigmas are in units of mag, right?
-#   Hmm.. maybe I should normalize the targets to std normal? Then sigmas would be always be in [0, 1]
-#   OR I could scale but just know that the output sigmas aren't really the width of the dist for that target at that y, but instead are scaled version
-#   Should still be able to use them for loss function, since they are scaled the same way, right?
+#   But I really shouldnt be scaling to [0, 1] at all unless I want to scale targets too and rescale them both after
 ############################
         
 class SimpleDistNet(nn.Module):
     
-   def __init__(self, hidden_layers, h, in_channels, out_channels): 
+   def __init__(self, hyper_params, in_channels, out_channels): 
     super(SimpleDistNet, self).__init__()
-    self.linears1 = nn.ModuleList([nn.Linear(in_channels, h), nn.Sigmoid()])
-    self.linears2 = nn.ModuleList([nn.Linear(in_channels, h), nn.Sigmoid()])
+
+    hidden_layers = hyper_params['hidden_layers']
+    h = hyper_params['hidden_channels']
+    act_func = run_utils.get_act_func(hyper_params['activation'])
+
+    print('  Model has hidden_layers', hidden_layers, 'h', h, 'in_channels', in_channels, 'out_channels', out_channels, 'act_func', act_func)
+
+    self.linears1 = nn.ModuleList([nn.Linear(in_channels, h), act_func]) 
+    self.linears2 = nn.ModuleList([nn.Linear(in_channels, h), act_func])
     for i in range(hidden_layers):
         self.linears1.append(nn.Linear(h, h))
-        self.linears1.append(nn.Sigmoid())
+        self.linears1.append(act_func) 
         self.linears2.append(nn.Linear(h, h))
-        self.linears2.append(nn.Sigmoid())
-    self.linears1.append(nn.Linear(h, out_channels))
-    self.linears2.append(nn.Linear(h, out_channels))
-    self.linears2.append(nn.Sigmoid())
-    # self.linears1 = nn.Sequential(nn.Linear(in_channels, h), nn.Sigmoid(), nn.Linear(h, h), nn.Sigmoid(), nn.Linear(h, out_channels))
-    # self.linears2 = nn.Sequential(nn.Linear(in_channels, h), nn.Sigmoid(), nn.Linear(h, h), nn.Sigmoid(), nn.Sigmoid(), nn.Linear(h, out_channels), nn.Sigmoid())
+        self.linears2.append(act_func) 
+    self.linears1.extend([nn.LayerNorm(h), nn.Linear(h, out_channels)]) #self.linears1.append(nn.Linear(h, out_channels))
+    self.linears2.extend([nn.LayerNorm(h), nn.Linear(h, out_channels)]) #self.linears2.append(nn.Linear(h, out_channels))
+    # self.linears2.append(act_func()) # REMOVING see above comment
     
-
    def forward(self, x, debug=False):
 
     x1 = clone(x)
@@ -1204,12 +1210,31 @@ class SimpleDistNet(nn.Module):
     for m in self.linears2:
         x2 = m(x2)
         if debug: print(f"{m} {x2[0,0:5].detach().numpy()}")
-    sig = x2
+    logsig = x2
     
-    if torch.stack([torch.isnan(p).any() for p in self.linears2.parameters()]).any():
-        raise ValueError('NaNs in weights of sigma layers')
-    if torch.stack([torch.isnan(p).any() for p in self.linears1.parameters()]).any():
-        raise ValueError('NaNs in weights of mu layers')
+    if torch.stack([torch.isnan(p).any() for p in self.linears2.parameters()]).any(): raise ValueError('NaNs in weights of sigma layers')
+    if torch.stack([torch.isnan(p).any() for p in self.linears1.parameters()]).any(): raise ValueError('NaNs in weights of mu layers')
 
-    return mu, sig
+    return mu, logsig
+
+
+class SimpleDistNet2(nn.Module):
+    def __init__(self, n_in, n_out, hidden=64, nlayers=2, layer_norm=True):
+        super().__init__()
+        '''Simple MLP class with ReLU activation + layernorm'''
+        layers = [nn.Linear(n_in, hidden), nn.ReLU()]
+        for i in range(nlayers):
+            layers.append(nn.Linear(hidden, hidden))
+            layers.append(nn.ReLU())
+        if layer_norm:
+            layers.append(nn.LayerNorm(hidden))
+        layers.append(nn.Linear(hidden, 2 * n_out))  # Output both mean and std
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, x):
+        output = self.mlp(x)
+        n_out = output.size(1) // 2
+        mean = output[:, :n_out]
+        std = F.softplus(output[:, n_out:])  # Ensure std is positive
+        return mean, std
    
