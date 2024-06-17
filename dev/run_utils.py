@@ -80,20 +80,40 @@ def get_model(model_name, hyper_params):
     return model
 
 
-def get_loss_func(name):
+def get_loss_func(loss_name):
     '''
     Load loss function from loss_funcs file
     '''
     # sys.path.insert(0, 'ObservablesFromTrees/dev/') 
     # from dev import loss_funcs
 
-    loss_func = getattr(loss_funcs, name)
+    loss_func = getattr(loss_funcs, loss_name)
     try:
         l=loss_func()
     except:
         l=loss_func
 
     return l
+
+def get_act_func(act_name):
+    '''
+    Load activation function from torch
+    '''
+    #act_func = getattr(nn, act_name)
+    if act_name =='ReLU':
+        act_func = nn.ReLU()
+    elif act_name =='LeakyReLU': 
+        act_func= nn.LeakyReLU()
+    elif act_name =='Sigmoid':
+        act_func = nn.Sigmoid()
+    elif act_name =='Tanh':
+        act_func = nn.Tanh()
+    elif act_name =='Softmax':
+        act_func = nn.Softmax()
+    else: raise ValueError(f'Activation function {act_name} not recognized. Choose from ReLU, LeakyReLU, Sigmoid, Tanh, Softmax, or add to get_act_func in run_utils.py.')
+
+    return act_func
+
 
 def get_downsize_func(method_num):
 
@@ -103,20 +123,20 @@ def get_downsize_func(method_num):
     return function
 
 
-def test(loader, model, n_targ, get_var = False, return_x = False):
+def test(loader, model, n_targ, predict_dist = False, return_x = False):
     '''
     Returns targets and predictions
     '''
-    ys, yhats, vars, xs, = [],[], [], []  # add option to return xs
+    ys, yhats, sigs, xs, = [],[], [], []  # add option to return xs
     model.eval()
     with torch.no_grad():
         for data in loader: 
             ys.append(data.y.view(-1,n_targ))
             xs.append(data.x)
-            if get_var:
-                pred_mu, pred_sig = model(data)
+            if predict_dist:
+                pred_mu, pred_logsig = model(data)
                 yhats.append(pred_mu)
-                vars.append(pred_sig)
+                sigs.append(torch.exp(pred_logsig)) # convert from log(sig) to sig
             else:
                 yhat = model(data)
                 yhats.append(yhat)
@@ -124,9 +144,9 @@ def test(loader, model, n_targ, get_var = False, return_x = False):
     yhats = torch.vstack(yhats).cpu().numpy()
     xs = torch.vstack(xs).cpu().numpy()
 
-    if get_var:
-        vars = torch.vstack(vars).cpu().numpy()
-        preds = [yhats, vars]
+    if predict_dist:
+        sigs = torch.vstack(sigs).cpu().numpy()
+        preds = [yhats, sigs]
     else:
         preds = yhats
 
@@ -151,27 +171,31 @@ def final_test(taskdir, modelname):
     data_params = config['data_params']
     used_targs = data_params['use_targs']
     used_feats = data_params['use_feats']
-    hyper_params['get_sig'] = True if run_params['loss_func'] in ["GaussNd", "Navarro"] else False 
+    hyper_params['get_sig'] = True if run_params['loss_func'] in ["GaussNd", "Navarro", "GaussNd_torch"] else False 
     hyper_params['get_cov'] = True if run_params['loss_func'] in ["GaussNd_corr"] else False
 
     # Load test data 
     hyper_params['in_channels'] = len(used_feats)
     hyper_params['out_channels'] = len(used_targs)
-    test_data, _ = pickle.load(open(data_utils.get_subset_path(data_params, set = 'test'), 'rb')) 
+    if 'sam' not in data_params['data_path']:
+        test_data, _ = pickle.load(open(data_utils.get_subset_path(data_params, set = 'test')  , 'rb'))
+    else:
+        test_data = pickle.load(open(osp.expanduser(f"{data_params['data_path']}/{data_params['data_file']}".replace('.pkl', '_testdata.pkl'))  , 'rb'))
     test_loader = DataLoader(test_data, batch_size=run_params['batch_size'], shuffle=0, num_workers=run_params['num_workers']) 
     
     # Run model on test data
     model = getattr(models, run_params['model'])(**hyper_params) 
     model.load_state_dict(torch.load(f'{taskdir}/{modelname}/model_best.pt', map_location=torch.device('cpu')))
     n_targ = len(used_targs)
-    get_var = True if hyper_params['get_sig'] or hyper_params['get_cov'] else False 
-    ys, preds = test(test_loader, model, n_targ, get_var) # testvars is [] if not get_var
-    if get_var: yhats = preds[0]
+    predict_dist = True if hyper_params['get_sig'] or hyper_params['get_cov'] else False 
+    ys, preds = test(test_loader, model, n_targ, predict_dist) # returned preds[1] is sig not logsig
+    if predict_dist: yhats = preds[0]
     else: yhats = preds
     metrics = {'rmse': np.std(yhats - ys, axis=0),
                'rho': np.array([stats.pearsonr(ys[:,i], yhats[:,i]).statistic for i in range(ys.shape[1])]), # Pearson R
                'R2': np.array([skmetrics.r2_score(ys[:,i], yhats[:,i]) for i in range(ys.shape[1])]), # coefficient of determination
                'bias': np.mean(yhats - ys, axis=0)} # mean difference between yhat and y
+    print(f"  Saving test results for {modelname} to {taskdir}/{modelname}/testres.pkl")
     pickle.dump((ys, preds, metrics), open(f'{taskdir}/{modelname}/testres.pkl', 'wb'))
 
     return ys, preds, metrics
@@ -213,129 +237,6 @@ def final_test(taskdir, modelname):
 
 #     return testys, testpreds, metrics
 
-'''
-For comparing to simple Final Halo Only MLP
-'''
-def run_simplemodel(taskdir, loss_fn, hidden_layers=4, n_epochs=200, lr=0.1, retrain=False, name='', vol='vol100', dataset='DS1', targ_type='phot'):
-
-    print(f"Running model {name}")
-    use_feats = ['Mvir(10)']
-    if targ_type == 'phot': use_targs = ["U", "B", "V", "K", "g", "r", "i", "z"] # all 
-    if targ_type == 'props': use_targs = ["SubhaloBHMass", "SubhaloGasMass", "SubhaloStelMass", "SubhaloSFR", "SubhaloVmax"] # from Task_props exp1
-
-    # Create simple dataset (if not already created)
-    datapath = f'/mnt/home/lzuckerman/ceph/Data/{vol}/'
-    if not os.path.exists(f'{datapath}/{dataset}_finalhalosdata.pkl'):
-        print(f'  Final halos only dataset not already created for {dataset}, creating now')
-        sm_traindata, sm_testdata = data_utils.data_finalhalos(datapath, dataset, targ_type, use_feats, use_targs) # data_utils.data_fake()
-        pickle.dump((sm_traindata, sm_testdata), open(f'{datapath}/{dataset}_finalhalosdata.pkl', 'wb'))
-
-    # Get data
-    print(f"  Loading train and test data from {datapath}/{dataset}_finalhalosdata.pkl")
-    sm_traindata, sm_testdata = pickle.load(open(f'{datapath}/{dataset}_finalhalosdata.pkl', 'rb'))
-    sm_trainloader = DataLoader_notgeom(sm_traindata, batch_size=256, shuffle=True, num_workers=2)
-    sm_testloader = DataLoader_notgeom(sm_testdata, batch_size=256, shuffle=False, num_workers=2) # SHOULD HAVE HAD SHUFFLE=FALSE!
-    in_channels = len(next(iter(sm_traindata))[0])
-    out_channels = len(next(iter(sm_traindata))[1])
-
-    # Train (if not already trained)
-    get_var = loss_fn in ['GaussNd', 'Navarro', 'Navarro2']
-    if get_var:
-        model = models.SimpleDistNet(hidden_layers, 50, in_channels, out_channels)
-    else:
-        model = models.SimpleNet(100, in_channels, out_channels)
-    modelpath =  f'{taskdir}/FHO/{name}.pt'
-    if (not os.path.exists(modelpath)) or retrain:
-        print(f'  Training {name} ({model}, {n_epochs} epochs, loss_fn {loss_fn})')
-        simple_train(model, sm_trainloader, loss_fn, lr, n_epochs, name=name)
-        torch.save(model.state_dict(), modelpath)
-    else: print(f'  Trained model already exists for {name}. Loading it back in to compute test results')
-
-    # Test and save results
-    print(f'  Testing {name}')          
-    model.load_state_dict(torch.load(modelpath))
-    ys, preds = simple_test(sm_testloader, model, get_var=get_var) 
-    yhats = data_utils.get_yhats(preds, sample_method='single') # If this is a dist-predicting model, do sample to get yhats
-    metrics = {'rmse': np.std(yhats - ys, axis=0), 
-               'rho': np.array([stats.pearsonr(ys[:,i], yhats[:,i]).statistic for i in range(ys.shape[1])]), 
-               'R2': np.array([skmetrics.r2_score(ys[:,i], yhats[:,i]) for i in range(ys.shape[1])]), 
-               'bias': np.mean(yhats - ys, axis=0)}
-    pickle.dump((ys, preds, metrics), open(f'{modelpath.replace(".pt", "")}_testres.pkl', 'wb'))
-
-    # Save "config" file for future reference 
-    config = {'run_params': {'model':name, 'loss_func':loss_fn, 'n_epochs':n_epochs}, 
-              'hyper_params': {'hidden_layers':hidden_layers, 'lr':lr},
-              'data_params': {'data_path':'~/ceph/Data/vol100/', 
-                              'data_file':f'{dataset}z0', 
-                              'use_feats': use_feats, 
-                              'use_targs':['U', 'B', 'V', 'K', 'g', 'r', 'i', 'z']}}
-    json.dump(config, open(f'{modelpath.replace(".pt", "")}_config.json', 'w'))
-
-    return ys, preds, metrics
-
-# Train simple model
-def simple_train(model, trainloader, loss_fn, lr, n_epochs=100, debug=False, name=''):
-  
-  predict_mu_sig = True if loss_fn in ['GaussNd', 'Navarro', 'Navarro2'] else False
-  loss_func = get_loss_func(loss_fn)
-
-  optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-  model.train()
-  for e in range(n_epochs):
-    tot_loss = 0
-    i = 0 
-    for x, y in trainloader:
-      optimizer.zero_grad()
-      if predict_mu_sig:
-        if debug: print(f"{i}"); i+=1
-        muhat, sighat = model(x)
-        loss, _, _ = loss_func(muhat, y, sighat)
-        loss.backward()
-        nn.utils.clip_grad_value_(model.parameters(), clip_value=0.5)
-        optimizer.step()
-        tot_loss += loss.item()
-      else: 
-        yhat = model(x)
-        loss = loss_func(yhat, y)
-        loss.backward()
-        optimizer.step()
-        tot_loss += loss.item()
-
-    #print(f'[Epoch {e + 1}] avg loss: {np.round(tot_loss/len(trainloader),5)}')
-    print(f'    Epoch {e + 1}', end="\r")
-print("")
-
-
-# Test simple model
-def simple_test(loader, model, get_var):
-    '''
-    Returns targets and predictions
-    '''
-
-    ys, yhats, vars, xs, = [],[], [], []  # add option to return xs
-    model.eval()
-    with torch.no_grad():
-        for x, y in loader: 
-            ys.append(y)
-            xs.append(x)
-            if get_var:
-                pred_mu, pred_sig = model(x)
-                yhats.append(pred_mu)
-                vars.append(pred_sig)
-            else:
-                yhat = model(x)
-                yhats.append(yhat)
-    ys = torch.vstack(ys).cpu().numpy()
-    yhats = torch.vstack(yhats).cpu().numpy()
-    xs = torch.vstack(xs).cpu().numpy()
-
-    if get_var:
-        vars = torch.vstack(vars).cpu().numpy()
-        preds = [yhats, vars]
-    else:
-        preds = yhats
-
-    return ys, preds
 
 
 # ''' HOW DID I END UP WITH THESE VERSIONS?? MAIN HAS THE UPDATED ONES!!! DID I FORGET TO PULL DOWN MAIN BEFORE MAKING NEW BRANCH? CRAP. WHAT ELSE IS AND OLS VERSION???
@@ -429,60 +330,92 @@ class CPU_Unpickler(pickle.Unpickler):
             return super().find_class(module, name)
 
 
-def get_modelsDF(taskdir, dataset):
+def get_modelsDF(taskdir, dataset=None):
 
     # Get list of models (experiments) and FHO models
-    models_list = [exp for exp in os.listdir(taskdir) if os.path.isdir(os.path.join(taskdir, exp)) and exp.startswith('e') and exp not in ['exp_tiny', 'exp1']]
+    models_list = [exp for exp in os.listdir(taskdir) if os.path.isdir(os.path.join(taskdir, exp)) and exp.startswith('e') and exp not in ['exp_tiny']]
     models_list += [exp.replace('.pt','') for exp in os.listdir(f"{taskdir}/FHO/") if exp.endswith('.pt')]
     all_info = []
-
+    
     # Create dict of model information (for models with desired dataset)
     for model in models_list:
 
-        # Get config and results files
+        # Get config, train results, and test results files
         if 'FHO' in model: 
-            resfile = f'{taskdir}/FHO/{model}_testres.pkl'
+            trnresfile = f'{taskdir}/FHO/{model}_train_results.pkl'
+            testresfile = f'{taskdir}/FHO/{model}_testres.pkl'
             config = json.load(open(f'{taskdir}/FHO/{model}_config.json', 'rb'))
         else: 
-            resfile = osp.join(taskdir, model, 'testres.pkl')
+            trnresfile = osp.join(taskdir, model, 'result_dict.pkl')
+            testresfile = osp.join(taskdir, model, 'testres.pkl')
             config = json.load(open(osp.join(taskdir, model, 'expfile.json'), 'rb'))
 
-        # If this is a completed model, load results, and if this is a dist model, re-compute metrics for a bunch of samples of the distribution and get average
-        if not osp.exists(resfile):
+        # If this is a completed model, load results, check if only pt-estimating, and re-compute metrics for a bunch of predicted distribution samples
+        if not osp.exists(testresfile):
             print(f"Skipping {model} no test results file found")
             continue
-        testys, testpreds, test_results = pickle.load(open(resfile, 'rb'))
-        if len(testpreds) ==2: 
-            avg_samp_res = data_utils.get_avg_samp_res(testys, testpreds, n_samples=10)
+        testys, testpreds, test_results = pickle.load(open(testresfile, 'rb'))
+        if len(testpreds) != 2: 
+            print(f"Skipping {model} (point est only)")
+            continue
+        rhos, rmses, R2s, baises, scatters = data_utils.sample_results(testys, testpreds, n_samples=100)
 
-        # Add to dict 
-        vol = config['data_params']['data_path'].replace('~/ceph/Data/','')[:-1]
+        # If this model has a training results file (wasnt saving for early FHOs), load it and get stop epoch
+        if osp.exists(trnresfile):
+            try: trnres = pickle.load(open(trnresfile, 'rb'))
+            except RuntimeError: 
+                trnres = data_utils.CPU_Unpickler(open(trnresfile, 'rb')).load()
+            try: epochs = f"{trnres['epochexit']} (of {config['run_params']['n_epochs']})" 
+            except KeyError: epochs = config['run_params']['n_epochs']
+        else: epochs = config['run_params']['n_epochs']
+
+        # Get means and SDs of each metric over all samples
+        mean_rho = np.mean(rhos, axis=0) 
+        sd_rho = np.std(rhos, axis=0) 
+        mean_rmse = np.mean(rmses, axis=0) 
+        sd_rmse = np.std(rmses, axis=0) 
+        mean_R2 = np.mean(R2s, axis=0)
+        sd_R2 = np.std(R2s, axis=0)
+        mean_bias = np.mean(baises, axis=0)
+        sd_bias = np.std(baises, axis=0)
+        mean_scatter = np.mean(scatters, axis=0)
+        sd_scatter = np.std(scatters, axis=0)
+
+        # Add to dict the means of the means and SDs over all targets
         datafile = config['data_params']['data_file']
-        ds = datafile[:3]
-        if ds == dataset:
-            info = {'exp': model, 
-                    'rho': np.round(np.mean(test_results['rho']),2), # mean over all targets
-                    'avg samp rho': np.round(np.mean(avg_samp_res['rho']),2) if len(testpreds)==2 else '', # mean over all targets
-                    'rmse': np.round(np.mean(test_results['rmse']),2), # mean over all targets
-                    'avg samp rmse': np.round(np.mean(avg_samp_res['rmse']),2) if len(testpreds)==2 else '', # mean over all targets
-                    'R2': np.round(np.mean(test_results['R2']),2), # mean over all targets, 
-                    'avg samp R2': np.round(np.mean(avg_samp_res['R2']),2) if len(testpreds)==2 else '', # mean over all targets
-                    'bias': np.round(np.mean(test_results['bias']),2), # mean over all targets
-                    'avg samp bais': np.round(np.mean(avg_samp_res['bias']),2) if len(testpreds)==2 else '', # mean over all targets
-                    #'val rmse': np.round(np.mean(train_results['val rmse final test']),2) if not 'FHO' in model else '', 
-                    'loss func': config['run_params']['loss_func'], 
-                    'n epochs': config['run_params']['n_epochs'], 
-                    'feats' : config['data_params']['use_feats'], 
-                    #'targs': config['data_params']['use_targs'], 
-                    'DS': f'{vol}, {ds}'
-                    }
-            all_info.append(info)
+        if dataset != None: # for any tasks that arent sam props I'll want to look at models for a sepcific dataset
+            ds = datafile[:3]
+            if ds != dataset:
+                continue
+            vol = 'SAM' if 'FHO' in model else config['data_params']['data_path'].replace('~/ceph/Data/','')[:-1]
+        else:
+            ds = datafile.replace('.pkl','')
+            vol = 'SAM' if 'FHO' in model else config['data_params']['data_path'].replace('~/ceph/Data/','')[:-1]
+        pm = r'$\pm$'
+        info = {'exp': model, 
+                #'rho': np.round(np.mean(test_results['rho']),2), # mean over all targets
+                'mean rho': f"{np.round(np.mean(mean_rho),2)} +/- {np.round(np.mean(sd_rho),3)}",  # mean over all targets
+                #'rmse': np.round(np.mean(test_results['rmse']),2), # mean over all targets
+                'mean rmse': f"{np.round(np.mean(mean_rmse),2)} +/- {np.round(np.mean(sd_rmse),3)}", # mean over all targets
+                #'R2': np.round(np.mean(test_results['R2']),2), # mean over all targets, 
+                'mean R2': f"{np.round(np.mean(mean_R2),2)} +/- {np.round(np.mean(sd_R2),3)}",  # mean over all targets
+                #'bias': np.round(np.mean(test_results['bias']),2), # mean over all targets
+                'mean bais': f"{np.round(np.mean(mean_bias),2)} +/- {np.round(np.mean(sd_bias),3)}",  # mean over all targets
+                #'val rmse': np.round(np.mean(train_results['val rmse final test']),2) if not 'FHO' in model else '',
+                'mean sactter': f"{np.round(np.mean(mean_scatter),2)} +/- {np.round(np.mean(sd_scatter),3)}",  # mean over all targets 
+                'loss func': config['run_params']['loss_func'], 
+                'n epochs': epochs, 
+                'feats' : config['data_params']['use_feats'], 
+                #'targs': config['data_params']['use_targs'], 
+                'DS': f'{vol}, {ds}'
+                }
+        all_info.append(info)
 
     # Make into DF and sort
     models = pd.DataFrame.from_dict(all_info)   
-    models['abs bias'] = np.abs(models['bias']) 
-    models = models.sort_values(by=['rho', 'rmse', 'R2', 'abs bias'], ascending=[False, True, False, False])
-    models.drop(columns=['abs bias'], inplace=True)
+    #models['abs bias'] = np.abs(models['bias']) 
+    #models = models.sort_values(by=['rho', 'rmse', 'R2', 'abs bias'], ascending=[False, True, False, False])
+    #models.drop(columns=['abs bias'], inplace=True)
 
 
     return models
