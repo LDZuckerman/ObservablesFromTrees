@@ -2,14 +2,14 @@ from uu import Error
 from pytools import F
 import torch
 from torch import log_
-from torch.nn import MSELoss, L1Loss, SmoothL1Loss
+from torch.nn import MSELoss, L1Loss, SmoothL1Loss, GaussianNLLLoss
 from torch import log, sum, square, vstack, zeros, bmm, det, inverse
 import numpy as np
 
 
-###############################
-###    Simple loss funcs   ####
-###############################
+#############################
+###   Simple loss funcs  ####
+#############################
 def L2():
     return MSELoss()
 
@@ -22,63 +22,45 @@ def SmoothL1():
 def MSE():
     return MSELoss()
 
-###############################
-###  Homemade loss funcs   ####
-##########################################
-###  All are negative log likelihoods   ####
-########################################## 
+def GaussNd_torch():
+    return GaussianNLLLoss()
+
+###################################
+###  Negative log likelihoods  ####
+###################################
 
 def GaussNd(pred_mu, ys, pred_sig):
     '''
     Loss func to fit for sigma as a function of X and feature, assuming guassian errors.
-     - pred_sig [n_targ, n_obs] (?): predicted std of each target, e.g. diagonal of covariance matrix
+     - pred_sig [n_targ, n_obs]: predicted SD of each target, e.g. diagonal of covariance matrix
     '''
-    z = square((pred_mu-ys)/pred_sig)
+    pred_var = pred_sig**2
+    z = square(pred_mu-ys)/pred_var
     err_loss = sum(z)/2 
-    sig_loss = sum(log(pred_sig))
+    sig_loss = sum(log(pred_var))
+    loss = err_loss + sig_loss
 
     if torch.isnan(sig_loss):
         raise ValueError('Sigloss has become NaN')
     
-    return err_loss+sig_loss, err_loss, sig_loss    
+    return loss, err_loss, sig_loss    
 
-# def GaussNd(pred, ys, var):
-#     '''General uncorrelated gaussian'''
-#     z = (pred-ys)/var 
-#     sigloss = sum(log(var))
-#     err_loss = sum((square(z)))/2 
-    
-#     return err_loss+sigloss, err_loss, sigloss   
 
 def Navarro(pred_mu, ys, pred_sig):
     '''
     From Navarro et al. 2020
     Loss func to fit for sigma as a function of X and feature, BUT allowing targets to have non-guassian errors (they can come from an arbitrary distribution). 
-     - pred_var [n_targ, n_obs] (?): predicted variance of each target, e.g. diagonal of covariance matrix
+     - pred_sig [n_targ, n_obs]: predicted SD of each target, e.g. diagonal of covariance matrix
     '''
-
+    pred_var = pred_sig**2
     mu_err = (pred_mu - ys)**2
     mu_loss = sum(log(sum(mu_err)))
-    #pred_sig = torch.abs(pred_var)**0.5 #pred_sig = pred_var**0.5 # this becomes all nan because pred var contains negatives
-    sig_err = ((pred_mu - ys)**2 - pred_sig**2)**2
+    sig_err = ((pred_mu - ys)**2 - pred_var)**2
     sig_loss = sum(log(sum(sig_err)))
+    loss = mu_loss + sig_loss
 
-    return mu_loss + sig_loss, mu_loss, sig_loss
+    return loss, mu_loss, sig_loss
 
-def Navarro2(pred_mu, ys, pred_var):
-    '''
-    From Navarro et al. 2020
-    Loss func to fit for sigma as a function of X and feature, BUT allowing targets to have non-guassian errors (they can come from an arbitrary distribution). 
-     - pred_var [n_targ, n_obs] (?): predicted variance of each target, e.g. diagonal of covariance matrix
-    '''
-
-    mu_err = (pred_mu - ys)**2
-    mu_loss = sum(log(sum(mu_err)))
-    pred_sig = torch.abs(pred_var)**0.5 #pred_sig = pred_var**0.5 # this becomes all nan because pred var contains negatives
-    sig_err = ((pred_mu - ys)**2 - pred_sig**2)**2
-    sig_loss = sum(log(sum(sig_err)))
-
-    return mu_loss + sig_loss, mu_loss, sig_loss
 
 def GuassNd_corr(pred_mu, ys, pred_cov):
     '''
@@ -86,14 +68,14 @@ def GuassNd_corr(pred_mu, ys, pred_cov):
      - pred_cov [n_targ, n_targ, n_obs] (?): predicted covariance of each target
     '''
 
-    # # chol = torch.cholesky(pred_cov)
+    # # chol = torch.cholesky(pred_cov) <- should instead predict the lower triangular so that dont need choslsky , then construct full cov from that. e.g. network predict entries of lower triangular (flattened). In loss, convert to lower triagnular, put 
     # # mu_err = (pred_mu - ys)**2
-    # y_dist = torch.distributions.MultivariateNormal(pred_mu, pred_cov)  
+    # # y_dist = torch.distributions.MultivariateNormal(pred_mu, pred_cov)  
     # log_prob = y_dist.log_prob(ys) # ??????
     
     raise NotImplementedError('Loss function not yet implemented')
 
- # If predicting exactly 2 targets?
+# If predicting exactly 2 targets?
 def Gauss2d(pred, ys, var):
     '''2d Gaussian, can be subbed for GaussND'''
 
