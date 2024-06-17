@@ -5,7 +5,7 @@
 #SBATCH -C v100                   # aka "constraint": use nodes with only listed feature (I think this is the only type on Popeye though?)
 #SBATCH -N 1                      # aka "nodes": number of nodes to request
 #SBATCH --mem=160G                # total memory to request (will 160G resolve the out-of-memory error?) [putting this in in place of #SBATCH --mem-per-cpu=24G     # memory per cpu-core (4G per cpu-core is default)]
-#SBATCH --gpus=2                  # total GPUs to request 
+#SBATCH --gpus=1                  # total GPUs to request (should check time to run on 1 vs 2 GPU, esp with wait time to request 2)
 #SBATCH -p 'gpu'                  # aka "partition"
 #SBATCH --output=SlurmOut/E%j.out # path relative to WORKING directory, NOT directory of this file
 
