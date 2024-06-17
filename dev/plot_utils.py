@@ -26,30 +26,27 @@ except:
 # Functions for single model results
 ####################################
 
-def plot_phot_preds(ys, preds, labels, unit, name, sample_method=None):
+def plot_phot_preds(ys, preds, labels, unit='mag', name=None, sample_method='mean'):
     '''
     Plot predicted vs true values for each phot target
     - If sampling, plot samples from predicted distributions
     '''
 
-    l1, l2, step = -25, -12, 2
-    u = '[mag]'
-    if unit == 'erg/s/cm²/Å':
-        l1, l2 , step = -10, -5, 1
-        u = r'log($f_{\lambda}$) [erg/s/cm²/Å]'
     yhats = data_utils.get_yhats(preds, sample_method)
+    if yhats.ndim == 3:
+        yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
     fig, axs = plt.subplots(2, 4, figsize=(15, 7), sharex=True, sharey=True)
-    plt.xticks(np.arange(l1, l2, step))
-    plt.yticks(np.arange(l1, l2, step))
+    # plt.xticks(np.arange(l1, l2, step))
+    # plt.yticks(np.arange(l1, l2, step))
     for i in range(2):
         for j in range(4):
             idx = 4*i+j
-            plot_phot(axs[i,j], yhats, ys, idx, labels, unit, l1, l2)  
+            plot_targ(axs[i,j], yhats[:,idx], ys[:,idx])  # ax, yhat, y, lims=None, textcmap=None, rmse_min=None, rmse_max=None)
+            axs[i,j].text(0.1, 0.9, f'{labels[idx]} band', fontsize=8, transform=axs[i,j].transAxes, weight='bold')
     #if sample: axs[0, -1].text(0.5, 0.85, 'NOTE: all data sampled from \npredicted distributions', fontsize=6, transform=axs[0, -1].transAxes)
-    note = 'sampled from predicted distributions' if sample_method != None  else 'using predicted means'
-    plt.suptitle(f'{name} U-V color vs r magnitude {note}')
-    fig.supxlabel(f'Hydro Truth {u}')
-    fig.supylabel(f'Model Prediction {u}')
+    fig.supxlabel(f'Hydro Truth [mag]')
+    fig.supylabel(f'Model Prediction [mag]')
+    plt.suptitle(name)
     plt.tight_layout()
     plt.subplots_adjust(wspace=0, hspace=0)
 
@@ -66,8 +63,8 @@ def plot_props_preds(ys, preds, labels, name):
             idx = 3*i+j
             pred = preds[:,idx] 
             y = ys[:,idx]   
-            #vals, x_pos, y_pos, hist = axs[i,j].hist2d(pred, y, bins=50, range=[np.percentile(np.hstack([pred,y]), [0,100]), np.percentile(np.hstack([pred,y]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis)
-            vals, x_pos, y_pos, hist = axs[i,j].hist2d(y, pred, bins=50, range=[np.percentile(np.hstack([y,pred]), [0,100]), np.percentile(np.hstack([y,pred]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis, alpha=0.5)
+            #vals, x_pos, y_pos, im = axs[i,j].hist2d(pred, y, bins=50, range=[np.percentile(np.hstack([pred,y]), [0,100]), np.percentile(np.hstack([pred,y]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis)
+            vals, x_pos, y_pos, im = axs[i,j].hist2d(y, pred, bins=50, range=[np.percentile(np.hstack([y,pred]), [0,100]), np.percentile(np.hstack([y,pred]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis, alpha=0.5)
             X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
             axs[i,j].contour(X,Y, np.log(vals.T+1), levels=4, linewidths=0.75, colors='white')
             axs[i,j].plot([np.min(y),np.max(y)],[np.min(y),np.max(y)], 'k--', label='Perfect correspondance')
@@ -84,21 +81,23 @@ def plot_props_preds(ys, preds, labels, name):
 
     return fig
 
-def plot_phot_err(ys, preds, labels, unit, name, sample_method=None):
+def plot_phot_err(ys, preds, labels, unit='mag', name=None, sample_method=None):
     '''
     Plot prediction error vs true values for each phot target
     '''
 
-    Fr = [0.79, -0.09, -0.02, -0.40, 8.9e-5, 8.8e-5, 8.7e-5, 8.28e-5] # SDSS U, B,V, in erg/s/cm²/Å. approx u, g, r, i, z conversions from nano-maggies
-    l1, l2, step = -25, -12, 2
-    u = '[mag]'
-    if unit == 'erg/s/cm²/Å':
-        l1, l2, step = -10, -5, 1
-        u = r'log($f_{\lambda}$) [erg/s/cm²/Å]'
+    # Fr = [0.79, -0.09, -0.02, -0.40, 8.9e-5, 8.8e-5, 8.7e-5, 8.28e-5] # SDSS U, B,V, in erg/s/cm²/Å. approx u, g, r, i, z conversions from nano-maggies
+    # l1, l2, step = -25, -12, 2
+    # u = '[mag]'
+    # if unit == 'erg/s/cm²/Å':
+    #     l1, l2, step = -10, -5, 1
+    #     u = r'log($f_{\lambda}$) [erg/s/cm²/Å]'
     yhats = data_utils.get_yhats(preds, sample_method)
+    if yhats.ndim == 3:
+        yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
     fig, axs = plt.subplots(2, 4, figsize=(15, 5), sharex=True, sharey=True)
-    plt.xticks(np.arange(l1, l2, step))
-    plt.yticks(np.linspace(-30, 30, 5))
+    # plt.xticks(np.arange(l1, l2, step))
+    # plt.yticks(np.linspace(-30, 30, 5))
     for i in range(2):
         for j in range(4):
             idx = 4*i+j
@@ -120,13 +119,13 @@ def plot_phot_err(ys, preds, labels, unit, name, sample_method=None):
             axs[i,j].fill_between(bin_centers, bin_1st, bin_99th, color='g', alpha=0.07, label='98%')
             axs[i,j].axhline(0, color='black', linestyle='--')
             axs[i,j].text(0.1, 0.9, f'{labels[idx]} band', fontsize=8, transform=axs[i,j].transAxes, weight='bold')
-            axs[i,j].set_xlim(l1, l2)
-            axs[i,j].set_ylim(-30, 30)
+            # axs[i,j].set_xlim(l1, l2)
+            # axs[i,j].set_ylim(-30, 30)
     #if sampled: axs[0, -1].text(0.6, 0.8, 'NOTE: all data sampled from \npredicted distributions', fontsize=6, transform=axs[0, -1].transAxes)
     note = 'using samples from predicted distributions' if sample_method != None  else 'using predicted means'
     plt.suptitle(f'{name} percent error {note}')
     axs[-1, -1].legend()   
-    fig.supxlabel(f'Hydro Truth {u}')
+    fig.supxlabel(f'Hydro Truth [mag]')
     fig.supylabel('Percent Error')
     plt.tight_layout()
     plt.subplots_adjust(wspace=0, hspace=0)
@@ -159,6 +158,7 @@ def plot_err_epoch(val_rmse, targs, stop_epoch, units, name):
 
 def plot_colormags(ys, preds, targs, cs, name):
     '''
+    NOT MAINTAINED
     Plot predicted and true color vs magnitude for given color pairs
     '''
 
@@ -364,46 +364,67 @@ def plot_spatial(pos_test, mstar_test, pos_raw, mstar_raw):
 
     return fig
 
+def plot_samprops_preds(ys, preds, labels, targs, sample_method='mean'):
+    '''
+    Plot predicted vs true values for each target
+    '''
+
+    fig, axs = plt.subplots(len(targs), 1, figsize=(4, len(targs)*3), sharey='row')
+    for i in range(len(targs)):
+        yhats  = data_utils.get_yhats(preds, sample_method)
+        if yhats.ndim == 3:
+            yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
+        y = ys[:,i]
+        yhat = yhats[:,i]
+        vals, x_pos, y_pos, im = axs[i].hist2d(y, yhat, bins=50, range=[np.percentile(np.hstack([y,yhat]), [0,100]), np.percentile(np.hstack([y,yhat]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis, alpha=0.5)
+        X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
+        axs[i].contour(X,Y, np.log(vals.T+1), levels=4, linewidths=0.75, colors='white')
+        axs[i].plot([np.min(y),np.max(y)],[np.min(y),np.max(y)], 'k--', label='Perfect correspondance')
+        #axs[i,0].text(0.02, 0.95, f'{labels[i]}', fontsize=10, transform=axs[i,0].transAxes, weight='bold')
+        axs[i].set_ylabel(f'{labels[targs[i]]}', fontsize=9)
+        axs[i].text(0.6, 0.2, f'rmse: {np.round(float(np.std(yhat-y)),3)}', fontsize=8, transform=axs[i].transAxes)
+        axs[i].tick_params(axis='both', which='major', labelsize=8)
+        rho = stats.pearsonr(y, yhat).statistic # = np.cov(np.stack((y, pred), axis=0))/(np.std(y)*np.std(pred)) # pearson r
+        axs[i].text(0.6, 0.15, f'pearson r: {np.round(float(rho),3)}', fontsize=8, transform=axs[i].transAxes)
+
+    fig.supxlabel(f'Hydro Truth', fontsize=12)
+    fig.supylabel(f'Model Prediction', fontsize=12)
+    plt.tight_layout()
+    plt.subplots_adjust(wspace=0, hspace=0.15)
+
+    return fig
+
 #####################################
 # Functions for compare model results
 #####################################
 
-def compare_phot_preds(taskdir, models, modelnames, unit='erg/s/cm²/Å', sample_method=None, uselabels=None):
+def compare_phot_preds(taskdir, models, modelnames, sample_method='no_sample', uselabels=None, plottype='heat'):
     '''
     For given models, compare predicted vs true values for each phot target
     '''
-
     if modelnames ==  None:
         modelnames = {m:m for m in models}
-    l1, l2 = -25, -12
     rmse_min = 0.5; rmse_max = 1.3
-    u = '[mag]'
-    ticks = np.arange(l1, l2, 3)
-    if unit == 'erg/s/cm²/Å':
-        l1, l2 = -10, -5
-        rmse_min = 0.21; rmse_max = 0.38
-        u = r'log($f_{\lambda}$) [erg/s/cm²/Å]'
-        ticks = np.arange(l1, l2, 1)
-    if sample_method != None: l2 += 1
+    lims = [(-28, -11),(-28, -11)]
     if uselabels == None: # if not specified, use all labels (and get from any model's config - currently assuming all predict same targets)
         configfile = f'{taskdir}/FHO/{models[0]}_config.json' if 'FHO' in models[0] else f'{taskdir}/{models[0]}/expfile.json'
         uselabels = json.load(open(configfile, 'rb'))['data_params']['use_targs']
     fig, axs = plt.subplots(len(uselabels), len(models), figsize=(4*len(models), len(uselabels)*2.5), sharex=True, sharey=True)
-    textcmap = truncate_colormap(cm.get_cmap('hot'), 0, 0.3) #truncate_colormap(cm.get_cmap('ocean'), 0, 0.2)
-    plt.xticks(ticks)
-    plt.yticks(ticks)
+    textcmap = None # truncate_colormap(cm.get_cmap('hot'), 0, 0.3) #truncate_colormap(cm.get_cmap('ocean'), 0, 0.2)
     for j in range(len(models)):
         resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
         ys, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats  = data_utils.get_yhats(preds, sample_method)
+        yhats = data_utils.get_yhats(preds, sample_method)
+        if yhats.ndim == 3:
+            yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
         for i in range(len(uselabels)):
-            plot_phot(axs[i,j], yhats, ys, i, uselabels, unit, l1, l2, textcmap, rmse_min, rmse_max)  
-        axs[0,j].set_title(f'{modelnames[models[j]]}', fontsize=10)
+            plot_targ(axs[i,j], yhats[:,i], ys[:,i], lims=lims, textcmap=textcmap, rmse_min=rmse_min, rmse_max=rmse_max, nbins=100, plottype=plottype)  
+            axs[i,j].text(0.1, 0.9, f'{uselabels[i]} band', fontsize=10, transform=axs[i,j].transAxes, weight='bold')
+            axs[i,j].invert_xaxis(); axs[i,j].invert_yaxis() 
+        axs[0,j].set_title(f'{modelnames[models[j]]}', pad=5, fontsize=10)
         if sample_method != None and len(preds)!=2: axs[j,0].text(0.05, 0.6, 'NOTE: Point-predicting model: \npredictions are not samples \nfrom predicted \ndistributions', fontsize=8, transform=axs[0,j].transAxes)
-    fig.supxlabel(f'Hydro Truth {u}')
-    fig.supylabel(f'Model Prediction {u}')
-    note = 'sampled from predicted distributions' if sample_method != None else 'using predicted means'
-    plt.suptitle(f'U-V color vs r magnitude {note}\n')
+    fig.supxlabel('Hydro Truth [mag]', fontsize=16)
+    fig.supylabel(f'Model Prediction [mag]', fontsize=16)
     plt.tight_layout()
     plt.subplots_adjust(wspace=0, hspace=0)
 
@@ -412,12 +433,13 @@ def compare_phot_preds(taskdir, models, modelnames, unit='erg/s/cm²/Å', sample
 def compare_phot_err(taskdir, models, modelnames, sample_method=None, uselabels=None):
     '''
     For given models, compare prediction error vs true values for each phot target
-    - If 'plot_dist' is False
-            A single point sample is drawn from the guassian for each observation
-            The plotted bounds represent the distribution of errors for galaxies within a binned range of true values
-    - If 'plot_dist' is True
-            A large number of samples are drawn from the guassian for each observation
-            The plotted bounds represent the distribution of errors for galaxies with a given true value
+    NOTE: NEED TO ADD THE FOLLOWING FUNCTIONALITY:
+        - If 'plot_dist' is False
+                A single point sample is drawn from the guassian for each observation
+                The plotted bounds represent the distribution of errors for galaxies within a binned range of true values
+        - If 'plot_dist' is True
+                A large number of samples are drawn from the guassian for each observation
+                The plotted bounds represent the distribution of errors for galaxies with a given true value
     '''
 
     if uselabels == None: # if not specified, use all labels (and get from any model's config - currently assuming all predict same targets)
@@ -428,6 +450,8 @@ def compare_phot_err(taskdir, models, modelnames, sample_method=None, uselabels=
         resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
         ys, preds, _ = pickle.load(open(resfile, 'rb'))
         yhats = data_utils.get_yhats(preds, sample_method) # returns [n_targs, n_obs] if sample_method is None, [n_targs, n_obs, n_samples] if sample_method is not None
+        if yhats.ndim == 3:
+            yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
         for i in range(len(uselabels)):
             yhat = yhats[:,i] 
             y = ys[:,i]   
@@ -446,42 +470,180 @@ def compare_phot_err(taskdir, models, modelnames, sample_method=None, uselabels=
 
     return fig
 
-def compare_UVr(taskdir, models, modelnames, sample_method=None):
+def compare_UVr(taskdir, dataset, models, modelnames, sample_method='mean', slice_r=-21, N=100, t=''):
     '''
     For given models, compare predicted U-V color vs r magnitude
+    NOTE: For a larger sample, using full TNG dataset for truth, not just test set, so positions are not directly comparable
     '''
 
-    fig, axs = plt.subplots(1, len(models)+1, figsize=((len(models)+1)*3, 4), sharey=True)
-    example_model = [m for m in models if 'FHO' not in m][0] # just make sure not an FHO (totally could use, but then result path is different)
-    ys, _, _ = pickle.load(open(f'{taskdir}/{example_model}/testres.pkl', 'rb')) # load from one model's result file - faster than looping over test set graphs
+    # Load and plot true
+    all_data_combined = pd.read_pickle(open(f'../Data/vol100/{dataset}_all_data_combined.pkl','rb'))
+    ys = np.vstack(all_data_combined['phot']) 
     Us = ys[:,0]; Vs = ys[:,2]; rs = ys[:,5]
-    extent = [[-23, -14], [-4, 4]] # approx limits of worst model (FHO3) when sampled - idk if this really captures things well though
-    trueUVr, xedges, yedges = np.histogram2d(rs, Us-Vs, bins=100, range=extent, density=True)  # set x and y ranges becasue otherwise kl div will be lower if predicted dist has huge range
-    axs[0].plot(rs, Us-Vs, 'ko', markersize=2, alpha=0.1)
+    extent = [[-25, -14], [-3, 4]]# [[-25, -14], [-1, 1.5]] if sample_method == 'mean' else [[-25, -14], [-3, 4]] # approx limits of worst model (FHO3) when sampled - idk if this really captures things well though
+    fig, axs = plt.subplots(1, len(models)+1, figsize=((len(models)+1)*3.5, 4), sharey=True, sharex=True)
+    trueUVr, x_pos, y_pos, im = axs[0].hist2d(rs, Us-Vs, bins=100, range=extent, cmap='Greys', norm=mpl.colors.LogNorm())
     axs[0].set(ylabel=f' U-V color', xlabel='r magnitude')
-    axs[0].set_title('True', fontsize=10)
+    axs[0].set_title('True', fontsize=10)  
+    axs[0].invert_xaxis() 
+    plot_inset_hist(axs[0], rs, Us-Vs, xloc=slice_r, vline_range=extent[1], color='blue')
+    
+    # Plot predicted U-V color vs r magnitude
+    for j in range(len(models)):
+        # Get predicted values 
+        resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
+        ys, preds, _ = pickle.load(open(resfile, 'rb'))
+        yhats = data_utils.get_yhats(preds, sample_method, N=N)
+        if yhats.ndim == 3:
+            yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
+        Uhats = yhats[:,0]; Vhats = yhats[:,2]; rhats = yhats[:,5] 
+        # If multiple samples, plot 2D histogram with contours, if single sample, scatter color against mag
+        if sample_method == 'no_sample':
+            axs[j+1].plot(rhats, Uhats-Vhats, 'ko', markersize=2, alpha=0.1)
+            UVerr = np.sqrt(np.std(rhats)**2 + np.std(Uhats-Vhats)**2) # maybe not quite correct, since this is if the errors are independent
+            axs[j+1].errorbar(rhats, Uhats-Vhats, yerr=UVerr, color='k', ls='none', elinewidth=0.05, alpha=0.1)
+            axs[j+1].legend(handles=[mpl.lines.Line2D([0], [0], color='k', lw=0.5, label='progogated U-V error'), mpl.lines.Line2D([0], [0], marker='o', markersize=5, markerfacecolor='k', color='w', label='sample')], loc='upper right')
+        else:
+            predUVr, x_pos, y_pos, im = axs[j+1].hist2d(rhats, Uhats-Vhats, bins=100, range=extent, cmap='Greys', norm=mpl.colors.LogNorm()) #predUVr, xedges, yedges = np.histogram2d(rhats, Uhats-Vhats, bins=100, range=extent, density=True) # set x and y ranges becasue otherwise kl div will be lower if predicted dist has huge range
+            X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
+            flat_nonzero = predUVr.flatten()[predUVr.flatten() > 0]
+            z_levels = [np.percentile(flat_nonzero,50)]# [np.percentile(flat_nonzero,10), np.percentile(flat_nonzero,50), np.percentile(flat_nonzero,75)] # np.percentile(vals.flatten(),2) = the bin val number for which 98% of the bins are above (98% of the data is within), since np.percentile(vals.flatten(),98) = the bin val number for which 98% of the data is below
+            cs = axs[j+1].contour(X,Y, predUVr.T, levels=z_levels, linewidths=0.75, colors='white') # np.log(vals.T+1)
+            fmt = {l:s for l, s in zip(cs.levels, ['50%'])} # ['90%', '50%', '25%']
+            axs[j+1].clabel(cs, cs.levels, inline=True, fmt=fmt, fontsize=7)
+        # Report error between predicted and true distributions
+        # predUVr = np.where(predUVr==0, 0.001, predUVr) # add small value to zero bins, otherwise KL_div will be inf for those bins # # COULD TRY instead normalizing only after histograming, and normalize to not exactly std normal to add some small values predUVr = (predUVr - np.mean(predUVr))/np.std(predUVr) 
+        # kldiv = np.round(np.mean(special.kl_div(trueUVr, predUVr)), 3) # mean over all bins. 0 if dists are exactly the same # relentr = np.round(np.mean(special.rel_entr(trueUVr, predUVr)), 3) # mean over all bins. 0 if dists are exactly the same  # ks_stat, ks_Pval = np.round(stats.ks_2samp(trueUVr, predUVr), 2) # Tests H0: two dists are the same. High P_value = cannot reject H0
+        # mmd = np.round(float(run_utils.MMD(trueUVr, predUVr, kernel='rbf')), 3) # Tests H0: two dists are the same. High P_value = cannot reject H0  
+        # t = axs[j+1].text(0.15, 0.85, f'MMD: {mmd}', fontsize=10, transform=axs[j+1].transAxes)
+        # t.set_bbox(dict(facecolor='white', alpha=0.5, edgecolor='grey'))
+        # Set ax labels and plot inset slice hist
+        plot_inset_hist(axs[j+1], rhats, Uhats-Vhats, xloc=slice_r, vline_range=extent[1], color='blue')
+        axs[j+1].set_title(f'{modelnames[models[j]]}', fontsize=10)
+        axs[j+1].set_xlabel(f'r magnitude')
+        axs[j+1].invert_xaxis() 
+
+    plt.suptitle(f'U-V color vs r magnitude{t}')
+    plt.tight_layout()
+    plt.subplots_adjust(wspace=0, hspace=0)
+    
+    return fig
+
+def compare_CMDs(taskdir, dataset, models, modelnames, colors, sample_method='mean'):
+    '''
+    For given models, compare predicted color vs magnitude
+    NOTE: For a larger sample, using full TNG dataset for truth, not just test set, so positions are not directly comparable
+    '''
+
+    extents = [] # extent = [[-25, -14], [-1, 1.5]] if sample_method == 'mean' else [[-25, -14], [-3, 4]] # approx limits of worst model (FHO3) when sampled - idk if this really captures things well though
+    used_targs = ["U", "B", "V", "K", "g", "r", "i", "z"]  # hardcoding since haven't yet wanted to change ever
+
+    # Load true and plot color vs mag for all color sets
+    all_data_combined = pd.read_pickle(open(f'../Data/vol100/{dataset}_all_data_combined.pkl','rb'))
+    ys = np.vstack(all_data_combined['phot']) #  np.array(np.vstack(list(allphot.values())))
+    fig, axs = plt.subplots(len(colors), len(models)+1, figsize=((len(models)+1)*3.5, len(colors)*3), sharey='row', sharex='col')
+    for i in range(len(colors)):
+        set = colors[i]
+        c1_idx = used_targs.index(set[0]); c2_idx = used_targs.index(set[1])        
+        C1s = ys[:,c1_idx]; C2s = ys[:,c2_idx]
+        C3s = C2s if len(set) == 2 else ys[:,used_targs.index(set[2])]
+        extent =[[min(C3s)-0.5, max(C3s)+0.5], [min(C1s-C2s)-2, max(C1s-C2s)+2]]
+        extents.append(extent)
+        trueCMD, x_pos, y_pos, im = axs[i,0].hist2d(C3s, C1s-C2s, bins=100, range=extent, cmap='Greys', norm=mpl.colors.LogNorm())
+        axs[i,0].invert_xaxis() 
+        axs[i,0].set(ylabel=f' {set[0]}-{set[1]} color', xlabel=f'{set[-1]} magnitude') 
+        plot_inset_hist(axs[i,0], C3s, C1s-C2s, xloc='marginal', vline_range=extent[1], color='grey')
+        axs[0,0].set_title('True', fontsize=10) 
+    
+    # Plot predicted color vs mag for all color sets
+    for j in range(len(models)):
+        # Get predicted values 
+        resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
+        ys, preds, _ = pickle.load(open(resfile, 'rb'))
+        yhats = data_utils.get_yhats(preds, sample_method)
+        if yhats.ndim == 3:
+            yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
+        for i in range(len(colors)):
+            set = colors[i]
+            c1_idx = used_targs.index(set[0]); c2_idx = used_targs.index(set[1])        
+            C1s = yhats[:,c1_idx]; C2s = yhats[:,c2_idx]
+            C3s = C2s if len(set) == 2 else yhats[:,used_targs.index(set[2])]
+            # If multiple samples, plot 2D histogram with contours, if single sample, scatter color against mag
+            if sample_method == 'no_sample':
+                axs[i,j+1].plot(C3s, C1s-C2s, 'ko', markersize=2, alpha=0.1)
+            else:
+                predCMD, x_pos, y_pos, im = axs[i,j+1].hist2d(C3s, C1s-C2s, bins=100, range=extents[i], cmap='Greys', norm=mpl.colors.LogNorm()) #predUVr, xedges, yedges = np.histogram2d(rhats, Uhats-Vhats, bins=100, range=extent, density=True) # set x and y ranges becasue otherwise kl div will be lower if predicted dist has huge range
+                X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
+                flat_nonzero = predCMD.flatten()[predCMD.flatten() > 0]
+                z_levels = [np.percentile(flat_nonzero,10), np.percentile(flat_nonzero,50), np.percentile(flat_nonzero,75)] # np.percentile(vals.flatten(),2) = the bin val number for which 98% of the bins are above (98% of the data is within), since np.percentile(vals.flatten(),98) = the bin val number for which 98% of the data is below
+                cs = axs[i,j+1].contour(X,Y, predCMD.T, levels=z_levels, linewidths=0.75, colors='white') # np.log(vals.T+1)
+                fmt = {l:s for l, s in zip(cs.levels, ['90%', '50%', '25%'])}
+                axs[i,j+1].clabel(cs, cs.levels, inline=True, fmt=fmt, fontsize=7)
+            # Report error between predicted and true distributions
+            # predCMD = np.where(predUVr==0, 0.001, predCMD) # add small value to zero bins, otherwise KL_div will be inf for those bins # # COULD TRY instead normalizing only after histograming, and normalize to not exactly std normal to add some small values predUVr = (predUVr - np.mean(predUVr))/np.std(predUVr) 
+            # kldiv = np.round(np.mean(special.kl_div(trueCMD, predCMD)), 3) # mean over all bins. 0 if dists are exactly the same # relentr = np.round(np.mean(special.rel_entr(trueUVr, predUVr)), 3) # mean over all bins. 0 if dists are exactly the same  # ks_stat, ks_Pval = np.round(stats.ks_2samp(trueUVr, predUVr), 2) # Tests H0: two dists are the same. High P_value = cannot reject H0
+            # mmd = np.round(float(run_utils.MMD(trueUCMD, predCMD, kernel='rbf')), 3) # Tests H0: two dists are the same. High P_value = cannot reject H0  
+            # t = axs[i,j+1].text(0.15, 0.85, f'MMD: {mmd}', fontsize=10, transform=axs[i,j+1].transAxes)
+            # t.set_bbox(dict(facecolor='white', alpha=0.5, edgecolor='grey'))
+            # Create inset axis with slice histogram, plot slice location
+            plot_inset_hist(axs[i,j+1], C2s, C1s-C2s, xloc='marginal', vline_range=extent[1], color='grey')
+            # Set ax labels
+            axs[i,j+1].set_xlabel(f'{set[-1]} magnitude')
+            axs[i,j+1].invert_xaxis() 
+            axs[0,j+1].set_title(f'{modelnames[models[j]]}', fontsize=10)
+
+    plt.suptitle(f'U-V color vs r magnitude')
+    plt.tight_layout()
+    plt.subplots_adjust(wspace=0.2, hspace=0.1)
+    
+    return fig
+
+def compare_UVr_slice(taskdir, dataset, models, modelnames, sample_method='mean'):
+    '''
+    For given models, compare predicted U-V color for galaxies in different r magnitude slices
+    NOTE: For a larger sampled, using full TNG dataset for truth, not just test set, so positions are not directly comparable
+    '''
+
+    # Plotting constraints
+    extent = [[-25, -14], [-1, 1.5]] if sample_method == 'mean' else [[-25, -14], [-4, 4]]
+    nbins = 30 if sample_method == 'mean' else 100 
+    slice_rs = [-21, -17]  #np.linspace(extent[0][0], extent[0][1], nslices+1) #slice_xs = np.linspace(0, nbins, nslices+1, dtype=int)
+    fig, axs = plt.subplots(len(slice_rs), len(models)+1, figsize=((len(models)+1)*3, len(slice_rs)*2.5), sharey=True, sharex=True)
+
+    # Load and plot true
+    allphot = pd.read_pickle(open(f'../Data/vol100/{dataset}_allphot.pkl','rb'))
+    ys = np.array(np.vstack(list(allphot.values())))
+    Us = ys[:,0]; Vs = ys[:,2]; rs = ys[:,5]
+    #trueUVr, xedges, yedges = np.histogram2d(rs, Us-Vs, bins=nbins, range=extent, density=True)
+    for i in range(len(slice_rs)):
+        idxs = np.where((rs > slice_rs[i]-0.5) & (rs < slice_rs[i]+0.5))[0]
+        UV = Us[idxs] - Vs[idxs]  #UV = trueUVr[slice_xs[i],:]
+        axs[i,0].hist(UV, bins=nbins, range=extent[1], color='grey', density=True)
+        axs[i,0].semilogy()
+        axs[i,0].set_ylabel(f'r mag {slice_rs[i]} +/- 0.5')
+    axs[0,0].set_title('True', fontsize=10)
+    
+    # Plot predicted U-V color hist for each r magnitude slice
     for j in range(len(models)):
         if 'FHO' in models[j]:
             resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl'
         else: 
             resfile = f'{taskdir}/{models[j]}/testres.pkl'
-        _, preds, _ = pickle.load(open(resfile, 'rb'))
+        ys, preds, _ = pickle.load(open(resfile, 'rb'))
         yhats = data_utils.get_yhats(preds, sample_method)
+        if yhats.ndim == 3:
+            yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
         Uhats = yhats[:,0]; Vhats = yhats[:,2]; rhats = yhats[:,5]
-        predUVr, xedges, yedges = np.histogram2d(rhats, Uhats-Vhats, bins=100, range=extent, density=True) # set x and y ranges becasue otherwise kl div will be lower if predicted dist has huge range
-        predUVr = np.where(predUVr==0, 0.001, predUVr) # add small value to zero bins, otherwise KL_div will be inf for those bins # # COULD TRY instead normalizing only after histograming, and normalize to not exactly std normal to add some small values predUVr = (predUVr - np.mean(predUVr))/np.std(predUVr) 
-        kldiv = np.round(np.mean(special.kl_div(trueUVr, predUVr)), 3) # mean over all bins. 0 if dists are exactly the same
-        # relentr = np.round(np.mean(special.rel_entr(trueUVr, predUVr)), 3) # mean over all bins. 0 if dists are exactly the same
-        # ks_stat, ks_Pval = np.round(stats.ks_2samp(trueUVr, predUVr), 2) # Tests H0: two dists are the same. High P_value = cannot reject H0
-        mmd = np.round(float(run_utils.MMD(trueUVr, predUVr, kernel='rbf')), 3) # Tests H0: two dists are the same. High P_value = cannot reject H0  
-        t = axs[j+1].text(0.6, 0.15, f'KLD: {kldiv}\nMMD: {mmd}', fontsize=10, transform=axs[j+1].transAxes)
-        t.set_bbox(dict(facecolor='white', alpha=0.5, edgecolor='grey'))
-        axs[j+1].plot(rhats, Uhats-Vhats, 'ko', markersize=2, alpha=0.1)
-        axs[j+1].set_title(f'{modelnames[models[j]]}', fontsize=10)
-        axs[j+1].set_xlabel(f'r magnitude')
-        if sample_method != None and len(preds)==2: axs[j+1].text(0.5, 0.8, 'NOTE: data sampled from \npredicted distributions', fontsize=6, transform=axs[j+1].transAxes)
-    note = 'sampled from predicted distributions' if sample_method != None else 'using predicted means'
-    plt.suptitle(f'U-V color vs r magnitude {note}')
+        # predUVr, xedges, yedges = np.histogram2d(rhats, Uhats-Vhats, bins=nbins, range=extent, density=True)
+        for i in range(len(slice_rs)):
+            idxs = np.where((rhats > slice_rs[i]-0.5) & (rhats < slice_rs[i]+0.5))[0]
+            UVhat = Uhats[idxs] - Vhats[idxs]  #UV = predUVr[slice_xs[i],:]
+            axs[i,j+1].hist(UVhat, bins=nbins, range=extent[1], color='grey', density=True)
+            axs[i,j+1].semilogy()
+        axs[0,j+1].set_title(f'{modelnames[models[j]]}', fontsize=10)
+
+    fig.supylabel('U-V color')
+    plt.suptitle('U-V color in r magnitude slices')
     plt.tight_layout()
     plt.subplots_adjust(wspace=0, hspace=0)
     
@@ -535,7 +697,7 @@ def compare_color_merghist(taskdir, dataset, models, modelnames, sample_method=N
 
     return fig   
 
-def compare_PS_band(taskdir, vol, dataset, models, modelnames, by='V mag', sample_method=None, plotdiff=False, cutoff=None):
+def compare_corr_band_old(taskdir, vol, dataset, models, modelnames, by='V mag', sample_method=None, plotdiff=False, cutoff=None):
     '''
     For given models, compare predicted PS for each band OR predicted-true PS for each band
     '''
@@ -583,13 +745,13 @@ def compare_PS_band(taskdir, vol, dataset, models, modelnames, by='V mag', sampl
             elif by == 'U-V':
                 idxs = np.where((V_true-U_true  > bins[i]) & (V_true-U_true  < bins[i+1]))[0]
             pos_true_bin = pos[idxs]
-            pos_true_bin_nc = (pos_true_bin/bs) * nc # want in units of nc
-            mstar_true_bin = mstar[idxs]  # Dont normalize - should allow bins with more massive gals to plot higher up # weights = mstar_true_bin/len(mstar_true_bin) # lets normalize by num gals in that bin, but not by the max mass in the bin #np.max(mstar_true_bin)
-            field_true = paintcic(pos_true_bin_nc, mass=mstar_true_bin, bs=bs, nc=nc)
+            pos_true_bin_nc = (pos_bin/bs) * nc # want in units of nc
+            mstar_bin = mstar[idxs]  
+            field_true = paintcic(pos_true_bin_nc, mass=mstar_bin, bs=bs, nc=nc)
             field_true = field_true/np.mean(field_true)
-            k_true, p_true = power(field_true, boxsize=bs) 
-            p_true_scl = p_true #- sum(mstar_true_bin)/bs**3 # sum of all masses in bin divided by volume
-            axs[0].plot(k_true, p_true_scl, c=colors[i])
+            k_true, p_true = power(field_true, boxsize=bs)
+            p_true_scl = p_true - sum(mstar_bin)/bs**3 # sum of all masses in bin divided by volume
+            axs[0].plot(k_true, p_true, c=colors[i])
         axs[0].set_xlabel(r'k [$h^{-1} Mpc$]')
         axs[0].set_title(f'Binned by Truth {by}', fontsize=10)
         if cutoff != None: axs[0].set_ylim(-50, cutoff)
@@ -654,11 +816,11 @@ def compare_PS_band(taskdir, vol, dataset, models, modelnames, by='V mag', sampl
 
     return fig
 
-def compare_PS_band_2(taskdir, vol, dataset, models, modelnames, modelcolors, by='V mag', sample_method=None, cutoff=None):
+def compare_corr_band(taskdir, vol, dataset, models, modelnames, modelcolors, by='V mag', sample_method=None, N=1000, plotdiff=True, bin_by='within'):
     '''
     For given models, compare predicted-true PS for each band 
     Same as above, but seperate ax for each band, not each model
-    And just do for comparing error
+    NOTE: only contains functionality for distribution-computing models
     '''
 
     # Load test data z0xall to get positions [should apply to all models using same dataset]
@@ -673,119 +835,76 @@ def compare_PS_band_2(taskdir, vol, dataset, models, modelnames, modelcolors, by
     all_featnames = tree_meta['featnames']
     pos = np.vstack([z0xall[:, all_featnames.index('x(17)')], z0xall[:, all_featnames.index('y(18)')], z0xall[:, all_featnames.index('z(19)')]]).T # Mpc/h
     
-    # Load test data other targs to get Mstar
-    all_otherSHtargs = pickle.load(open(f'../Data/{vol}/{dataset}_subfind_othertargs.pkl', 'rb'))
-    testidxs = np.load(osp.expanduser(f"../Data/{vol}/{dataset}_testidx20.npy")) 
-    all_testtargs =  pd.DataFrame(columns = all_otherSHtargs.columns)
-    for i in range(len(all_otherSHtargs)):
-        if i in testidxs: all_testtargs.loc[len(all_testtargs)] = all_otherSHtargs.iloc[i]
-    mstar = np.log10(np.array(all_testtargs['SubhaloStelMass'], dtype=float)*(10**10)/0.704) # mstar for test set (e.g. transformed)
-
-    # Load test data truth values [load from one model's result file - faster than looping over test set graphs]
-    example_model = [m for m in models if 'FHO' not in m][0] # just make sure not an FHO (totally could use, but then result path is different)
-    ys, _, _ = pickle.load(open(f'{taskdir}/{example_model}/testres.pkl', 'rb')) 
-    V_true = ys[:,2]
-
-    # Plotting constants
+    # PS constants
     nc = 128
     bs = 110.7*0.704 # want in units of Mpc/h
     bins = [-22, -21, -20, -18, -15, -13] # true goes from -25.376022 (brightest) to -14.138756 (dimmest)
-    # cs = cm.get_cmap(truncate_colormap(cm.get_cmap('jet'), 0.3, 0.7))(np.linspace(0,1,8)) 
-    # try:
-    #     colors = {models[i]:cs[i] for i in range(len(models))}
-    # except Exception:
-    #     raise IndexError('More models than colors in colormap. Change 8 to a bigger number above')
+    
+    # Get truth PS for each V-mag bin  [load from one model's result file - faster than looping over test set graphs]
+    example_model = [m for m in models if 'FHO' not in m][0] # just make sure not an FHO (totally could use, but then result path is different)
+    ys, _, _ = pickle.load(open(f'Task_phot/{example_model}/testres.pkl', 'rb')) 
+    V_true = ys[:,2]
+    ps_true_allbins = [] # PS for each bin
+    for i in range(len(bins)-1):
+        if bin_by == 'within': idxs = np.where((V_true > bins[i]) & (V_true < bins[i+1]))[0] 
+        if bin_by == 'brighter': idxs = np.where(V_true < bins[i+1])[0]
+        pos_true_bin = pos[idxs]
+        k, p_true = get_PS(pos_true_bin, bs, nc)
+        ps_true_allbins.append(p_true)
 
-    # Plot for pred bins
-    fig, axs = plt.subplots(len(bins)-1, 1, figsize=(6, (len(bins)-1)*3), sharex=True)
-    for j in range(len(models)):
-        if 'FHO' in models[j]:
-            resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl'
-            model_ds = json.load(open(f"{taskdir}/FHO/{models[j]}_config.json","rb"))['data_params']['data_file'].replace('.pkl', '')
-            #raise NameError('Cant yet add FHOs because use different test set, so pos and mstar dont correspond. If need to do this, will need to at least re-test the FHOs on final halos data created from the same graphs in the GNN test set.')
-        else: 
-            resfile = f'{taskdir}/{models[j]}/testres.pkl'
-            model_ds = json.load(open(f"{taskdir}/{models[j]}/expfile.json","rb"))['data_params']['data_file'].replace('.pkl', '')
-        if dataset not in model_ds:
-                print(f'WARNING: {models[j]} was trained on {model_ds} not {dataset}. Shouldnt compare models run on different datasets')
-        _, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats = data_utils.get_yhats(preds, sample_method) 
-        V_pred = yhats[:,2]
+    # If not plotting difference, plot the truth PS for each bin
+    fig, axs = plt.subplots(len(bins)-1, 1, figsize=(6, (len(bins)-1)*4), sharex=True)
+    if not plotdiff:
         for i in range(len(bins)-1):
-            idxs = np.where((V_pred > bins[i]) & (V_pred < bins[i+1]))[0] # np.where(V_pred < bins[i+1])[0] 
-            pos_bin = pos[idxs]
-            pos_pred_bin_nc = (pos_bin/bs) * nc # want in units of nc
-            mstar_bin = mstar[idxs]  
-            field_pred = paintcic(pos_pred_bin_nc, mass=mstar_bin, bs=bs, nc=nc)
-            field_pred = field_pred/np.mean(field_pred)
-            k_pred, p_pred = power(field_pred, boxsize=bs)
-            p_pred_scl = p_pred - sum(mstar_bin)/bs**3 # sum of all masses in bin divided by volume
-            idxs = np.where(V_true < bins[i+1])[0] # np.where((val > bins[i]) & (val < bins[i+1]))[0]
-            pos_true_bin = pos[idxs]
-            pos_true_bin_nc = (pos_true_bin/bs) * nc # want in units of nc
-            mstar_true_bin = mstar[idxs]  # Dont normalize - should allow bins with more massive gals to plot higher up # weights = mstar_true_bin/len(mstar_true_bin) # lets normalize by num gals in that bin, but not by the max mass in the bin #np.max(mstar_true_bin)
-            field_true = paintcic(pos_true_bin_nc, mass=mstar_true_bin, bs=bs, nc=nc)
-            field_true = field_true/np.mean(field_true)
-            k_true, p_true = power(field_true, boxsize=bs) 
-            p_true_scl = p_true #- sum(mstar_true_bin)/bs**3 # sum of all masses in bin divided by volume
-            rel_err = 100*(p_pred_scl-p_true_scl)/p_true_scl
-            ls = 'solid' if 'FHO' in models[j] else '-.'
-            axs[i].plot(k_pred, rel_err, c=modelcolors[models[j]], linestyle=ls, label=f'{modelnames[models[j]]}')    
-            if cutoff != None: axs[j].set_ylim(-50, cutoff) 
-            axs[i].set_ylabel('percent error')
-            axs[i].text(0.4, 0.9, f'{bins[i]} < V mag < {bins[i+1]}', transform=axs[i].transAxes)
+            ps_bin = np.array(ps_true_allbins[i])
+            axs[i].plot(k, ps_bin, c='black', label='True')  # k should be the same for all models
+            axs[i].set_ylabel(r'p(k) [$(h^{-1} Mpc)^3$]')
+            binlabel = f'{bins[i]} < V mag < {bins[i+1]}' if bin_by == 'within' else f'V mag < {bins[i+1]}'
+            axs[i].text(0.4, 0.9, binlabel, transform=axs[i].transAxes)
+        
+    # Loop over models
+    for j in range(len(models)):
+        
+        # Get the predicted PS for each V-mag bin, for each realization
+        resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
+        _, preds, _ = pickle.load(open(resfile, 'rb'))
+        yhats = data_utils.get_yhats(preds, sample_method, N) 
+        V_preds = yhats[:,:,2] # not flattened - 10000 realizations per obs
+        ps_preds_allbins, rel_errs_allbins = [], [] # PS for each realization, for each bin
+        for i in range(len(bins)-1):
+            ps_preds_bin, rel_errs_bin = [], [] # PS for each realization
+            for k in range(N):
+                # Get PS in this bin for this realization
+                V_pred = V_preds[k]
+                if bin_by == 'within': idxs = np.where((V_pred > bins[i]) & (V_pred < bins[i+1]))[0] # indxs of galaxies with predicted V within bin 
+                if bin_by == 'brighter': idxs = np.where(V_pred < bins[i+1])[0] 
+                pos_bin = pos[idxs]
+                k, p_pred = get_PS(pos_bin, bs, nc)
+                # Get rel err with true PS in this bin
+                p_true = ps_true_allbins[i]
+                rel_err = 100*(p_pred-p_true)/p_true
+                # Add to lists
+                ps_preds_bin.append(p_pred); rel_errs_bin.append(rel_err)
+            ps_preds_allbins.append(ps_preds_bin); rel_errs_allbins.append(rel_errs_bin)
+
+        # Plot the mean and sd of the rel err for each bin, or the raw PS
+        for i in range(len(bins)-1):
+            val_bin = np.array(rel_errs_allbins[i]) if plotdiff else np.array(ps_preds_allbins[i])
+            mean = np.nanmean(val_bin, axis=0) # mean over all realizations in this bin for each observations
+            sd = np.nanstd(val_bin, axis=0) # sd over all realizations in this bin for all observations
+            axs[i].plot(k, mean, c=modelcolors[models[j]], linestyle='-.', label=f'{modelnames[models[j]]}')  # k should be the same for all models, since pos is the same
+            axs[i].fill_between(k, mean-sd, mean+sd, color=modelcolors[models[j]], alpha=0.2)
+            if not plotdiff: axs[i].semilogy()
+            axs[i].set_ylabel('percent error' if plotdiff else r'p(k) [$(h^{-1} Mpc)^3$]')
+            binlabel = f'{bins[i]} < V mag < {bins[i+1]}' if bin_by == 'within' else f'V mag < {bins[i+1]}'
+            axs[i].text(0.4, 0.9, binlabel, transform=axs[i].transAxes)
+
     axs[-1].set_xlabel(r'k [$h^{-1} Mpc$]')
     axs[0].legend(fontsize=8, loc='upper left', edgecolor='white')
     fig.tight_layout()
     plt.subplots_adjust(wspace=0, hspace=0)
     plt.subplots_adjust(top=0.95)
-    t = f'Error in p(k) between galaxies binned by\ntrue {by} and vs predicted {by}' 
-    plt.suptitle(f'{t}')
-
-    return fig
-
-
-def compare_props_preds(ys, preds, sm_ys, sm_preds, targs):
-    '''
-    For given models, compare predicted vs true values for each target
-    '''
-
-    labels = {' mBH black hole mass [1.0E09 Msun](27)':'M_BH [1.0E09 Msun]',
-              ' mcold cold gas mass in disk [1.0E09 Msun](15)': 'M_gas [1.0E09 Msun]',
-              ' Metal_cold metal mass in cold gas [Zsun*Msun] (20)': 'M_met [Zsun*Msun]',
-              'mstar stellar mass [1.0E09 Msun](8)': 'M_star [1.0E09 Msun]',
-              ' sfrave100myr SFR averaged over 100 Myr [Msun/yr](23)': 'SFR_avg [Msun/yr]',
-              ' sfr instantaneous SFR [Msun/yr](21)': 'SFR_inst [Msun/yr]'}
-
-    fig, axs = plt.subplots(6, 2, figsize=(8, 15), sharey='row')
-    for i in range(len(targs)):
-        pred = preds[:,i]; sm_pred = sm_preds[:,i]
-        y = ys[:,i]; sm_y = sm_ys[:,i]
-        vals, x_pos, y_pos, hist = axs[i,0].hist2d(y, pred, bins=50, range=[np.percentile(np.hstack([y,pred]), [0,100]), np.percentile(np.hstack([y,pred]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis, alpha=0.5)
-        X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
-        axs[i,0].contour(X,Y, np.log(vals.T+1), levels=4, linewidths=0.75, colors='white')
-        axs[i,0].plot([np.min(y),np.max(y)],[np.min(y),np.max(y)], 'k--', label='Perfect correspondance')
-        #axs[i,0].text(0.02, 0.95, f'{labels[i]}', fontsize=10, transform=axs[i,0].transAxes, weight='bold')
-        axs[i,0].set_ylabel(f'{labels[targs[i]]}', fontsize=9)
-        axs[i,0].text(0.6, 0.2, f'rmse: {np.round(float(np.std(pred-y)),3)}', fontsize=8, transform=axs[i,0].transAxes)
-        axs[i,0].tick_params(axis='both', which='major', labelsize=8)
-        rho = stats.pearsonr(y, pred).statistic # = np.cov(np.stack((y, pred), axis=0))/(np.std(y)*np.std(pred)) # pearson r
-        axs[i,0].text(0.6, 0.15, f'pearson r: {np.round(float(rho),3)}', fontsize=8, transform=axs[i,0].transAxes)
-        vals, x_pos, y_pos, hist = axs[i,1].hist2d(sm_y, sm_pred, bins=50, range=[np.percentile(np.hstack([sm_y,sm_pred]), [0,100]), np.percentile(np.hstack([sm_y,sm_pred]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis, alpha=0.5)
-        X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
-        axs[i,1].contour(X,Y, np.log(vals.T+1), levels=4, linewidths=0.75, colors='white')
-        axs[i,1].plot([np.min(sm_y),np.max(sm_y)],[np.min(sm_y),np.max(sm_y)], 'k--', label='Perfect correspondance')
-        axs[i,1].text(0.6, 0.2, f'rmse: {np.round(float(np.std(sm_pred-sm_y)),3)}', fontsize=8, transform=axs[i,1].transAxes)
-        rho = stats.pearsonr(sm_y, sm_pred).statistic # = np.cov(np.stack((y, pred), axis=0))/(np.std(y)*np.std(pred)) # pearson r
-        axs[i,1].text(0.6, 0.15, f'pearson r: {np.round(float(rho),3)}', fontsize=8, transform=axs[i,1].transAxes)
-        axs[i,1].tick_params(axis='both', which='major', labelsize=8)
-
-    axs[0,0].set_title('GNN', fontsize=10)
-    axs[0,1].set_title('FHO', fontsize=10) 
-    fig.supxlabel(f'Hydro Truth', fontsize=12)
-    fig.supylabel(f'Model Prediction', fontsize=12)
-    plt.tight_layout()
-    plt.subplots_adjust(wspace=0, hspace=0.15)
+    plt.suptitle(f'Error in p(k) between galaxies binned by\ntrue V mag and vs predicted V mag' if plotdiff else 'Power spectra binned by predicted V mag')
 
     return fig
 
@@ -846,10 +965,86 @@ def compare_light_mass(taskdir, vol, dataset, models, modelnames, sample_method=
     return fig
 
 
+def compare_props_preds(taskdir, models, modelnames, labelunits, sample_method=None, uselabels=None):
+    '''
+    For given models, compare predicted vs true values for each props target
+    '''
+    
+    #l1, l2 = -25, -12
+    # rmse_min = 0.5; rmse_max = 1.3
+    # if sample_method != None: l2 += 1
+    if uselabels == None: # if not specified, use all labels (and get from any model's config - currently assuming all predict same targets)
+        configfile = f'{taskdir}/FHO/{models[0]}_config.json' if 'FHO' in models[0] else f'{taskdir}/{models[0]}/expfile.json'
+        uselabels = json.load(open(configfile, 'rb'))['data_params']['use_targs']
+    fig, axs = plt.subplots(len(uselabels), len(models), figsize=(4*len(models), len(uselabels)*2.5), sharey='row')
+    for j in range(len(models)):
+        resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
+        ys, preds, _ = pickle.load(open(resfile, 'rb'))
+        yhats  = data_utils.get_yhats(preds, sample_method)
+        yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
+        for i in range(len(uselabels)):
+            plot_targ(axs[i,j], yhats[:,i], ys[:,i])  
+            axs[i,0].set_ylabel(f'{labelunits[uselabels[i]]}')
+        axs[0,j].set_title(f'{modelnames[models[j]]}', fontsize=10)
+    fig.supylabel('Model Prediction')
+    fig.supxlabel('Hydro Truth')
+    plt.tight_layout()
+
+    return fig
+
+def compare_sigma_hists(taskdir, models, modelnames, uselabels):
+    '''
+    For given models, look at the distribution of the predicted sigmas (if not roughly guassian something is going wrong)
+    '''
+
+    fig, axs = plt.subplots(len(uselabels), len(models), figsize=(4*len(models), len(uselabels)*2.5))# sharey=True)
+    for j in range(len(models)):
+        resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
+        ys, preds, _ = pickle.load(open(resfile, 'rb'))
+        yhats = preds[0]; sighats = preds[1]
+        for i in range(len(uselabels)):
+            y = ys[:,i] 
+            yhat = yhats[:,i] 
+            sighat = sighats[:,i]   
+            axs[i,j].hist(sighat, bins=50, alpha=0.5)                     
+            axs[i,j].text(0.1, 0.9, f'{uselabels[i]} band', fontsize=8, transform=axs[i,j].transAxes, weight='bold')
+            axs[i,j].text(0.6, 0.25, r'Mean $\hat{\sigma}$ '+str(np.round(np.mean(sighat),2))+'\n'+r'SD $\hat{\sigma}$ '+str(np.round(np.std(sighat),3)), fontsize=8, transform=axs[i,j].transAxes)
+        axs[0,j].set_title(f'{modelnames[models[j]]}', fontsize=10)
+        fig.supxlabel('Predicted sig [mag]', fontsize=12)
+        plt.tight_layout()
+        plt.subplots_adjust(wspace=0, hspace=0)
+
+    return fig
+
 ###########################
 # Plotting helper functions
 ###########################
 
+def plot_inset_hist(ax, xs, ys, xloc, vline_range, color='blue'):  
+    '''
+    Add insed marginal or slice hist for 2D distribution plot
+    '''
+    if xloc == 'marginal':
+        vals = ys
+        ins_ax = ax.inset_axes([1, 0, 0.15, 1])   # [x, y, width, height] w.r.t. 
+        ins_ax.semilogx()
+        orientation='horizontal'
+        range = ax.get_ylim()
+        ins_ax.set_xticks([]); ins_ax.set_yticks([])
+        ins_ax.axis('off')
+    else:
+        idxs = np.where((xs > xloc-0.5) & (xs < xloc+0.5))[0]
+        vals = ys[idxs]
+        ax.vlines(xloc, vline_range[0], vline_range[1], color=color, linestyle='--', alpha=0.5)
+        ins_ax = ax.inset_axes([.15, .1, .4, .25])   # [x, y, width, height] w.r.t. ax
+        ins_ax.semilogy()
+        orientation = 'vertical'
+        range = None
+        ins_ax.tick_params(axis='both',labelsize=8)
+    ins_ax.hist(vals, bins=100, color=color, alpha=0.5, range=range, density=True, orientation=orientation) 
+    
+
+    return ax
 
 def plot_binned_dist(ax, x, y, nstatbins): 
     '''
@@ -869,32 +1064,48 @@ def plot_binned_dist(ax, x, y, nstatbins):
 
     return ax
 
-def plot_phot(ax, yhats, ys, idx, labels, unit, l1, l2, textcmap=None, rmse_min=None, rmse_max=None):
+def plot_targ(ax, yhat, y, lims=None, textcmap=None, rmse_min=None, rmse_max=None, nbins=50, plottype='heat'):
     '''
     Plot 2d histogram of true vs predicted values on given axis
     '''
 
-    Fr = [0.79, -0.09, -0.02, -0.40, 8.9e-5, 8.8e-5, 8.7e-5, 8.28e-5] # SDSS U, B,V, in erg/s/cm²/Å. approx u, g, r, i, z conversions from nano-maggies
-    yhat = yhats[:,idx] 
-    y = ys[:,idx]   
-    if unit == 'erg/s/cm²/Å':
-        y = (y - Fr[idx])/2.5 # 10**((y - Fr[idx])/2.5)
-        yhat = (yhat - Fr[idx])/2.5 # 10**((pred - Fr[idx])/2.5)
-    vals, x_pos, y_pos, hist = ax.hist2d(y, yhat, bins=50, range=[np.percentile(np.hstack([y,yhat]), [0,100]), np.percentile(np.hstack([y,yhat]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis)
-    X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
-    ax.contour(X,Y, np.log(vals.T+1), levels=4, linewidths=0.75, colors='white')
-    ax.plot([l1,l2],[l1,l2], 'k--', label='Perfect correspondance')
-    ax.text(0.1, 0.9, f'{labels[idx]} band', fontsize=8, transform=ax.transAxes, weight='bold')
-    rmse = np.round(float(np.std(yhat-y)),3)
-    rmse_color = textcmap(1-(rmse-rmse_min)/(rmse_max-rmse_min)) if textcmap is not None else 'black'
-    ax.text(0.6, 0.15, f'rmse: {rmse}', fontsize=10, transform=ax.transAxes, color=rmse_color)
-    rho = np.round(float(stats.pearsonr(y, yhat).statistic ),3) # = np.cov(np.stack((y, yhat, axis=0))/(np.std(y)*np.std(yhat)) # pearson r
+    # If heatmap, plot 2D histogram of yhat against y
+    if plottype == 'heat':
+        vals, x_pos, y_pos, im = ax.hist2d(y, yhat, bins=nbins, range=[np.percentile(np.hstack([y,yhat]), [0,100]), np.percentile(np.hstack([y,yhat]), [0,100])], norm=mpl.colors.LogNorm(), cmap=mpl.cm.viridis)
+        # Create contours
+        X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
+        flat_nonzero = vals.flatten()[vals.flatten() > 0]
+        z_levels = [np.percentile(flat_nonzero,2), np.percentile(flat_nonzero,50)] # np.percentile(vals.flatten(),2) = the bin val number for which 98% of the bins are above (98% of the data is within), since np.percentile(vals.flatten(),98) = the bin val number for which 98% of the data is below
+        try: cs = ax.contour(X,Y, vals.T, levels=z_levels, linewidths=0.75, colors='white') # np.log(vals.T+1)
+        except ValueError as e: raise ValueError(f'{e} - z levels {z_levels} ')
+        fmt = {l:s for l, s in zip(cs.levels, ['98%', '50%'])}
+        ax.clabel(cs, cs.levels, inline=True, fmt=fmt, fontsize=7)
+    # If scatter, plot scatter
+    elif plottype == 'scatter':
+        ax.scatter(y, yhat, s=0.5, c='k', alpha=0.3)
+    else: raise ValueError(f'plottype must be "heat" or "scatter" not {plottype}')
+    
+    # Report error q
+    #rmse = np.round(float(np.std(yhat-y)),3)
+    #rmse_color = textcmap(1-(rmse-rmse_min)/(rmse_max-rmse_min)) if textcmap is not None else 'black'
+    # ax.text(0.6, 0.15, f'rmse: {rmse}', fontsize=10, transform=ax.transAxes, color=rmse_color)
+    rho = float(stats.pearsonr(y, yhat).statistic ) # = np.cov(np.stack((y, yhat, axis=0))/(np.std(y)*np.std(yhat)) # pearson r
     rho_color = textcmap((rho-0.9)/(0.95-0.9)) if textcmap is not None else 'black'
-    ax.text(0.6, 0.2, f'pearson r: {rho}', fontsize=10, transform=ax.transAxes, color=rho_color)
-    ax.set_xlim(l1, l2)
-    ax.set_ylim(l1, l2)
+    bias = np.mean(y-yhat)  # mean of the residuals
+    scatter = np.std(y-yhat) # SD of the residuals
+    ax.text(0.6, 0.22, f'r: {np.round(rho,3)}', fontsize=13, transform=ax.transAxes, color=rho_color)
+    ax.text(0.6, 0.15, r'$\sigma$: '+f'{np.round(scatter,3)}', fontsize=13, transform=ax.transAxes)
+    ax.text(0.6, 0.08, f'bias: {np.round(bias,3)}', fontsize=13, transform=ax.transAxes)
+    
+    # Set ax limits and plot perfect correspondence line
+    if lims == None:
+        lims = [(np.min(y)-0.5, np.max(y)+0.5), (np.min(yhat)-0.5, np.max(yhat)+0.5)]
+    ax.plot([lims[0][0],lims[0][1]],[lims[1][0], lims[1][1]], 'k--', label='Perfect correspondance')
+    ax.set_xlim(lims[0][0], lims[0][1])
+    ax.set_ylim(lims[1][0], lims[1][1])
+    ax.tick_params(axis='both', labelsize=8)
 
-    return ax
+    return ax      
 
 
 ##########################
@@ -926,13 +1137,13 @@ def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False, colorb
     
     if colorbymass:
         di = nx.betweenness_centrality(G)
-        featr = []
+        ms = []
         for q, key in enumerate(di.keys()):
-            feat = x[q][masscol] #feat = transformer[tkeys[k]].inverse_transform(graph.x.numpy()[q,k].reshape(-1, 1))[0][0]
-            featr.append(feat)
-            di[key] = feat
+            m = x[q][masscol] #feat = transformer[tkeys[k]].inverse_transform(graph.x.numpy()[q,k].reshape(-1, 1))[0][0]
+            ms.append(m)
+            di[key] = m
         nx.set_node_attributes(G, di, 'Mvir') # just a typo that he was calling this n_prog??
-        labels = nx.get_node_attributes(G, 'Mvir') # dict of  "index: value" pairs 
+        labels = nx.get_node_attributes(G, 'Mvir') # dict of "index: value" pairs 
         masses = set(labels.values()) # just a typo that he was calling this progs??
         node_size = (x[:,masscol]-min(x[:,3])+1) # **1.2
         mapping = dict(zip(sorted(masses),count())) # should be dict of   # sorted() sorts by first value (scale)
@@ -942,7 +1153,6 @@ def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False, colorb
         colors = ['w' for n in nodes]
     else:
         colors = ['b' for n in nodes]
-
 
     # label_zpos = np.unique(1/x[:,scalecol] - 1) #  scale = 1/(1+z)    # np.unique(1/transformer[0].inverse_transform(feats[:,0].reshape(-1,1))-1)
     label_ypos = np.linspace(0, -100, 20)
@@ -966,10 +1176,10 @@ def plot_tree(graph, scalecol, masscol, fig, ax, first=False, last=False, colorb
     if last:
         if not first: ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=True)
         if isinstance(node_ids, str) and colorbymass:
-            rs = np.round(np.percentile(featr, np.linspace(0,100,8)),1)
+            ms = np.round(np.percentile(ms, np.linspace(0,100,9)),1)
             cbar = fig.colorbar(nc, shrink=0.5, ax=ax)
-            cbar.ax.set_yticklabels(rs)
-            cbar.set_label(r'Halo mass [log($M_h/M_{\odot}$)]') # cbar.set_label('Redshift')
+            cbar.ax.set_yticklabels(ms)
+            cbar.set_label(r'Halo mass [log$_{10}$ $M_{\odot}$]') # cbar.set_label('Redshift')
     ax.set_xticks([])
 
     return fig
@@ -1281,8 +1491,18 @@ def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=100):
 
 ############################################
 # Clustering analysis functions
-# From Chirag Modi https://github.com/modichirag/contrastive_cosmology/
+#   - 'power', 'ffthk', 'paintcic', and 'paint' and From Chirag Modi https://github.com/modichirag/contrastive_cosmology/
 ############################################
+
+def get_PS(pos, bs, nc):
+
+    pos_nc = (pos/bs) * nc # want in units of nc
+    field = paintcic(pos_nc, bs=bs, nc=nc) # mass=mstar_true_bin
+    field = field/np.mean(field)
+    k, p = power(field, boxsize=bs)
+
+    return k, p
+
 
 def power(f1, f2=None, boxsize=1.0, k = None, symmetric=True, demean=True, eps=1e-9):
     """
