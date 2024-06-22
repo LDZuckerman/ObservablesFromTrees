@@ -51,10 +51,16 @@ def run_simplemodel(taskdir, d, retrain=False, gpu=False):
 
     # Train (if not already trained)
     predict_dist = d['run_params']['loss_func'] in ['GaussNd', 'Navarro', 'Navarro2', 'GaussNd_torch']
-    if predict_dist:
+    # if predict_dist: model = models.SimpleDistNet(d['hyper_params'], in_channels, out_channels)
+    # else: model = models.SimpleNet(100, in_channels, out_channels)
+    if d['modelname'] == 'SimpleDistNet':
         model = models.SimpleDistNet(d['hyper_params'], in_channels, out_channels)
-    else:
+    elif d['modelname'] == 'SimpleDistNet2':
+        model = models.SimpleDistNet2(d['hyper_params'], in_channels, out_channels)
+    elif d['modelname'] == 'SimpleNet':
         model = models.SimpleNet(100, in_channels, out_channels)
+    else:
+        raise ValueError(f"Model name {d['modelname']} not recognized")
     if not os.path.exists(modelpath):
         train_results = simple_train(model, trainloader, d['run_params'], d['learn_params'], valloader, modelpath, gpu) # YES, SHOULDNT USE SAME TEST SET FOR VALIDATION, BUT IT REALLY SHOULDNT AFFECT ANYTHING AND THIS IS JUST FOR DEBUGGING
         print(f'  Training complete\nSaving trained model to {modelpath} and training results to {taskdir}/FHO/{name}_train_results.pkl')
@@ -88,6 +94,7 @@ def simple_train(model, trainloader, run_params, learn_params, valloader, modelp
     n_epochs = run_params['n_epochs']
     patience = run_params['patience']
     lr = learn_params['learning_rate']
+    clip = learn_params['clip']
     loss_fn = run_params['loss_func']
     predict_mu_sig = True if loss_fn in ['GaussNd', 'Navarro', 'Navarro2', 'GaussNd_torch'] else False
     loss_func = run_utils.get_loss_func(loss_fn)
@@ -127,7 +134,7 @@ def simple_train(model, trainloader, run_params, learn_params, valloader, modelp
             epoch_errloss += errloss.item() # zero if not custom loss
             epoch_sigloss += sigloss.item() # zero if not custom loss
             totloss.backward()
-            nn.utils.clip_grad_value_(model.parameters(), clip_value=0.5)
+            if eval(clip): nn.utils.clip_grad_value_(model.parameters(), clip_value=0.5)
             optimizer.step()
         totloss_all.append(np.round(epoch_totloss/len(trainloader),5))
         errloss_all.append(np.round(epoch_errloss/len(trainloader),5))

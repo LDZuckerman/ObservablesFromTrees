@@ -1841,19 +1841,17 @@ def get_yhats(preds, sample_method='large_sample', N=100):
 
         else:
             sigmahats = preds[1]
+            # if sample_method == 'single_': 
+            #     yhats = np.random.normal(muhats, sigmahats) 
+            # else:
+            y_samples = [np.random.normal(muhats, sigmahats) for i in range(N)]
 
-            if sample_method == 'single': 
-                yhats = np.random.normal(muhats, sigmahats) 
-                
-            else:
-                y_samples = [np.random.normal(muhats, sigmahats) for i in range(N)]
+            if sample_method == 'average_large_sample':
+                yhats = np.mean(y_samples, axis=0)
+            elif sample_method == 'large_sample':
+                yhats = np.array(y_samples)
 
-                if sample_method == 'average':
-                    yhats = np.mean(y_samples, axis=0)
-                elif sample_method == 'large_sample':
-                    yhats = np.array(y_samples)
-
-                else: raise ValueError(f'method must be no_sample, single, average, or large_sample not {sample_method}')  
+            else: raise ValueError(f'method must be no_sample, average_large_sample, or large_sample not {sample_method}')  
 
     else: 
         yhats = preds
