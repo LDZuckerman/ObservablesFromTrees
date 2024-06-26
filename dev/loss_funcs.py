@@ -1,11 +1,7 @@
-from uu import Error
 from pytools import F
 import torch
-from torch import log_
 from torch.nn import MSELoss, L1Loss, SmoothL1Loss, GaussianNLLLoss
-from torch import log, sum, square, vstack, zeros, bmm, det, inverse
-import numpy as np
-
+from torch import log, sum, square
 
 #############################
 ###   Simple loss funcs  ####
@@ -62,11 +58,19 @@ def Navarro(pred_mu, ys, pred_sig):
     return loss, mu_loss, sig_loss
 
 
-def GuassNd_corr(pred_mu, ys, pred_cov):
+def GuassNd_corr(pred_mu, ys, pred_fullsig):
     '''
-    Loss func to fit for sigma as a function of X and feature, assuming guassian errors and allowing covariance of features.
+    Loss func to fit for variances as a function of X and feature, assuming guassian errors and allowing covariance of features.
      - pred_cov [n_targ, n_targ, n_obs] (?): predicted covariance of each target
     '''
+
+    # Steps
+    #     Have network output vector “v”
+    #     Reshape v to a lower triangular matrix L
+    #           L = reshape(v) to get a lower triangular matrix. 
+    #           Will need to write this. Could use something like https://stackoverflow.com/questions/73075280/how-do-i-convert-a-31-vector-into-a-22-lower-triangular-matrix-in-pytorch
+    #     Get cov = L.L^T
+    #     Compute loss = multivariate_normal(mean, cov).log_prob(x)
 
     # # chol = torch.cholesky(pred_cov) <- should instead predict the lower triangular so that dont need choslsky , then construct full cov from that. e.g. network predict entries of lower triangular (flattened). In loss, convert to lower triagnular, put 
     # # mu_err = (pred_mu - ys)**2

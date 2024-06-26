@@ -330,7 +330,7 @@ class CPU_Unpickler(pickle.Unpickler):
             return super().find_class(module, name)
 
 
-def get_modelsDF(taskdir, dataset=None):
+def get_modelResultsDF(taskdir, dataset=None):
 
     # Get list of models (experiments) and FHO models
     models_list = [exp for exp in os.listdir(taskdir) if os.path.isdir(os.path.join(taskdir, exp)) and exp.startswith('e') and exp not in ['exp_tiny']]
@@ -359,6 +359,9 @@ def get_modelsDF(taskdir, dataset=None):
             print(f"Skipping {model} (point est only)")
             continue
         rhos, rmses, R2s, baises, scatters = data_utils.sample_results(testys, testpreds, n_samples=100)
+        if np.any(np.mean(rmses) > 1000): 
+            print(f"Skipping {model} (ridiculously high RMSE)")
+            continue
 
         # If this model has a training results file (wasnt saving for early FHOs), load it and get stop epoch
         if osp.exists(trnresfile):
@@ -419,6 +422,93 @@ def get_modelsDF(taskdir, dataset=None):
 
 
     return models
+
+def get_modelsDF(taskdir, type='GNN', dataset=None):
+
+    # Get list of models (experiments) and FHO models
+    if type == 'GNN':
+        models_list = [exp for exp in os.listdir(taskdir) if os.path.isdir(os.path.join(taskdir, exp)) and exp.startswith('e') and exp not in ['exp_tiny']]
+    elif type == 'MLP':
+        models_list = [exp.replace('.pt','') for exp in os.listdir(f"{taskdir}/FHO/") if exp.endswith('.pt')]
+    else: raise ValueError(f"Type {type} not recognized. Choose from 'GNN' or 'MLP'")
+    all_info = []
+    
+    # Create dict of model information (for models with desired dataset)
+    for model in models_list:
+
+        # Get config, train results, and test results files
+        if type == 'MLP': 
+            trnresfile = f'{taskdir}/FHO/{model}_train_results.pkl'
+            testresfile = f'{taskdir}/FHO/{model}_testres.pkl'
+            config = json.load(open(f'{taskdir}/FHO/{model}_config.json', 'rb'))
+            result_notes = json.load(open('Task_phot/FHO/all_FHO_res_notes.json','rb'))
+        else: 
+            trnresfile = osp.join(taskdir, model, 'result_dict.pkl')
+            testresfile = osp.join(taskdir, model, 'testres.pkl')
+            config = json.load(open(osp.join(taskdir, model, 'expfile.json'), 'rb'))
+
+        # If this is a completed model, load results, check if only pt-estimating, and re-compute metrics for a bunch of predicted distribution samples
+        if not osp.exists(testresfile):
+            print(f"Skipping {model} no test results file found")
+            continue
+        testys, testpreds, test_results = pickle.load(open(testresfile, 'rb'))
+        if len(testpreds) != 2: 
+            print(f"Skipping {model} (point est only)")
+            continue
+
+        # If this model has a training results file (wasnt saving for early FHOs), load it and get stop epoch
+        if osp.exists(trnresfile):
+            try: trnres = pickle.load(open(trnresfile, 'rb'))
+            except RuntimeError: 
+                trnres = data_utils.CPU_Unpickler(open(trnresfile, 'rb')).load()
+            try: epochs = f"{trnres['epochexit']} (of {config['run_params']['n_epochs']})" 
+            except KeyError: epochs = config['run_params']['n_epochs']
+        else: epochs = config['run_params']['n_epochs']
+
+        # Add to dict the means of the means and SDs over all targets
+        datafile = config['data_params']['data_file']
+        if dataset != None: # for any tasks that arent sam props I'll want to look at models for a sepcific dataset
+            ds = datafile[:3]
+            if ds != dataset:
+                continue
+            vol = 'vol100' if 'data_path' not in config['data_params'].keys() else config['data_params']['data_path'].replace('~/ceph/Data/','')[:-1]
+        else:
+            ds = datafile.replace('.pkl','')
+            vol = 'SAM' if 'FHO' in model else config['data_params']['data_path'].replace('~/ceph/Data/','')[:-1]
+        pm = r'$\pm$'
+        if type == 'MLP':
+            info = {'exp': model, 
+                    'modelname': 'SimpleDistNet' if 'modelname' not in config.keys() else config['modelname'],
+                    'loss func': config['run_params']['loss_func'], 
+                    'clip': 'True' if 'learn_params' not in config.keys() or 'clip' not in config['learn_params'] else config['learn_params']['clip'],
+                    'HLs': '' if 'hidden_layers' not in config['hyper_params'].keys() else config['hyper_params']['hidden_layers'],
+                    'HCs': '' if 'hidden_channels' not in config['hyper_params'].keys() else config['hyper_params']['hidden_channels'],
+                    'activation': '' if 'activation' not in config['hyper_params'].keys() else config['hyper_params']['activation'],
+                    'LN': 'True' if 'layer_norm' not in config['hyper_params'].keys() else config['hyper_params']['layer_norm'],
+                    'n epochs': epochs, 
+                    'feats' : config['data_params']['use_feats'], 
+                    #'targs': config['data_params']['use_targs'], 
+                    'DS': f'{vol}, {ds}',
+                    'note': '' if model not in result_notes.keys() else result_notes[model],
+                    }
+        else:
+            info = {'exp': model, 
+                    'n epochs': epochs, 
+                    'feats' : config['data_params']['use_feats'], 
+                    #'targs': config['data_params']['use_targs'], 
+                    'DS': f'{vol}, {ds}'
+                    }
+        all_info.append(info)
+
+    # Make into DF and sort
+    models = pd.DataFrame.from_dict(all_info)   
+    #models['abs bias'] = np.abs(models['bias']) 
+    #models = models.sort_values(by=['rho', 'rmse', 'R2', 'abs bias'], ascending=[False, True, False, False])
+    #models.drop(columns=['abs bias'], inplace=True)
+
+
+    return models
+
 
 # def get_modelsDF(taskdir):
 
