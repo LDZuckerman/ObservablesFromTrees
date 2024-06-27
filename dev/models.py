@@ -218,16 +218,59 @@ class SimpleNet(nn.Module):
     return out
 
 ############################
-# Simple model for predicting target distributions from ONLY final halos
-# EITHER make sure sigmas end with act func that makes them allways positive OR (better) interpret as log sigmas
-# Why do sigmas go to nan?
-#   Outputs of first linear get very large, which means sigmoid of them is always ~1 (would be the same for tanh)
-#   But I really shouldnt be scaling to [0, 1] at all unless I want to scale targets too and rescale them both after
+# Simple models for prediction from ONLY final halos
 ############################
+  
+class SimpleFullDistNet(nn.Module):
+   '''
+   Simple MLP that predicts mean and [  ] : 
+        mu = mean of the target distribution
+        logfullsig = [    ]  e.g. (sqrt of the) values in the lower triangular full covariance matrix of targets
+   NOTE: does include LayerNorm
+   NOTE: eventually should probabaly combine this with the below. Then just rerun the relevant MLPs for consistent naming
+   '''
+    
+   def __init__(self, hyper_params, in_channels, out_channels): 
+    super(SimpleDistNet, self).__init__()
+
+    hidden_layers = hyper_params['hidden_layers']
+    h = hyper_params['hidden_channels']
+    act_func = run_utils.get_act_func(hyper_params['activation'])
+
+    self.linears1 = nn.ModuleList([nn.Linear(in_channels, h), act_func]) 
+    self.linears2 = nn.ModuleList([nn.Linear(in_channels, h), act_func])
+    for i in range(hidden_layers):
+        self.linears1.append(nn.Linear(h, h))
+        self.linears1.append(act_func) 
+        self.linears2.append(nn.Linear(h, h))
+        self.linears2.append(act_func) 
+    self.linears1.extend([nn.LayerNorm(h), nn.Linear(h, out_channels)]) 
+    self.linears2.extend([nn.LayerNorm(h), nn.Linear(h, out_channels**2/2)]) # want to be able to reshape this to get the LT cov matrix, which would have n_targ**2/2 non-zero entries right?
+    
+   def forward(self, x, debug=False):
+
+    x1 = clone(x)
+    for m in self.linears1:
+        x1 = m(x1)
+    mu = x1
+    
+    x2 = clone(x)
+    for m in self.linears2:
+        x2 = m(x2)
+    logfullsig = x2
+    
+    if torch.stack([torch.isnan(p).any() for p in self.linears2.parameters()]).any(): raise ValueError('NaNs in weights of sigma layers')
+    if torch.stack([torch.isnan(p).any() for p in self.linears1.parameters()]).any(): raise ValueError('NaNs in weights of mu layers')
+
+    return mu, logfullsig
+   
         
 class SimpleDistNet(nn.Module):
    '''
-   Note - does include LayerNorm
+   Simple MLP that predicts mean and SD of distribution of each target: 
+        mu = mean of the target distribution
+        logsig = SD of the target distribution e.g. (sqrt of the) variances on the diagonal of a full covariance matrix of targets
+   NOTE: does include LayerNorm
    '''
     
    def __init__(self, hyper_params, in_channels, out_channels): 
@@ -271,8 +314,8 @@ class SimpleDistNet(nn.Module):
    
 class SimpleDistNet2(nn.Module):
     '''
-    Expansion of Chrisitan's MLP model to include a second output for the standard deviation of the target
-    Also, allow for hyperparameters to be passed in. Remove LayerNorm option for now. 
+    A second of the above model; expansion of Chrisitan's pt estimate MLP model to include a second output for the standard deviation of the target
+    Also, allow for hyperparameters to be passed in
     '''
     def __init__(self, hyper_params, in_channels, out_channels):
         super().__init__()
@@ -298,7 +341,6 @@ class SimpleDistNet2(nn.Module):
         if torch.stack([torch.isnan(p).any() for p in self.mlp.parameters()]).any(): raise ValueError('NaNs in weights of sigma layers')
 
         return mu, logsig
-
 
 class MLP(Module):
     '''
