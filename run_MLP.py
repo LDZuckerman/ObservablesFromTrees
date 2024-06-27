@@ -119,9 +119,9 @@ def simple_train(model, trainloader, run_params, learn_params, valloader, modelp
             totloss, errloss, sigloss = torch.tensor(0), torch.tensor(0), torch.tensor(0)
             optimizer.zero_grad()
             if predict_mu_sig:
-                muhat, logsighat = model(x)#, debug=True)
+                muhat, logsighat = model(x) # NOTE: if model is FullDistNet then losgsighat has n_targs**2/2 values, e.g. to reshape into LT full cov matrix
                 sighat = torch.exp(logsighat)
-                if loss_fn in ['GaussNd', 'Navarro','Navarro2']: 
+                if loss_fn in ['GaussNd', 'Navarro','Navarro2', 'GaussNd_corr']: 
                     totloss, errloss, sigloss = loss_func(muhat, y, sighat)
                 elif loss_fn == 'GaussNd_torch': # Torch GaussianNLLLoss expects var, not sig, and doesnt seperate loss terms
                     totloss = loss_func(muhat, y, sighat**2)
