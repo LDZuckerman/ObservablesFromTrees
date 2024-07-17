@@ -34,8 +34,7 @@ def plot_phot_preds(ys, preds, labels, unit='mag', name=None, sample_method='mea
     - If sampling, plot samples from predicted distributions
     '''
 
-    yhats = data_utils.get_yhats(preds, sample_method)
-    sighats = preds[1]
+    yhats, sighats = data_utils.get_yhats_sighats(preds, sample_method)
     if yhats.ndim == 3:
         yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
     fig, axs = plt.subplots(2, 4, figsize=(15, 7), sharex=True, sharey=True)
@@ -95,7 +94,7 @@ def plot_phot_err(ys, preds, labels, unit='mag', name=None, sample_method=None):
     # if unit == 'erg/s/cm²/Å':
     #     l1, l2, step = -10, -5, 1
     #     u = r'log($f_{\lambda}$) [erg/s/cm²/Å]'
-    yhats = data_utils.get_yhats(preds, sample_method)
+    yhats, _ = data_utils.get_yhats_sighats(preds, sample_method)
     if yhats.ndim == 3:
         yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
     fig, axs = plt.subplots(2, 4, figsize=(15, 5), sharex=True, sharey=True)
@@ -135,25 +134,23 @@ def plot_phot_err(ys, preds, labels, unit='mag', name=None, sample_method=None):
 
     return fig
 
-def plot_err_epoch(val_rmse, targs, stop_epoch, units, name):
+
+def plot_err_epoch(val_rmse, targs, stop_epoch, name):
     '''
     Plot validation error over training epoch
     '''
-    if not isinstance(units, list):
-        units = [units]*len(targs)
-        Fr = [0.79, -0.09, -0.02, -0.40, 8.9e-5, 8.8e-5, 8.7e-5, 8.28e-5] # SDSS U, B,V, in erg/s/cm²/Å. approx u, g, r, i, z conversions from nano-maggies
-        c = ['indigo','blue','green','red','firebrick','brown','maroon','black']
+
     fig, ax = plt.subplots(1, 1, figsize=(10, 4), sharex=True)
+    c = ['indigo','blue','green','red','firebrick','brown','maroon','black']
     for i in range(len(targs)):
         rmse = val_rmse[:,i]
-        if units[i] == 'erg/s/cm²/Å':
-            rmse = 10**((rmse - Fr[i])/2.5) # rmse_f = Fr[i]*10**((-rmse)/2.5) # convert to f_lambda (ASSUMING THIS IS ABS MAG)
-            ve = np.linspace(0, stop_epoch, len(rmse), dtype=int)
-            ax.plot(ve, rmse, color=c[i], label=targs[i], alpha=0.5)
+        ve = np.linspace(0, stop_epoch, len(rmse), dtype=int)
+        ax.plot(ve, rmse, color=c[i], label=targs[i], alpha=0.1)
+    ax.plot(ve, np.mean(np.vstack(val_rmse), axis=1), color='grey', linestyle='-')
     # ax.set_xticklabels(np.linspace(0, n_epoch, 6, dtype=int))
     ax.set_yscale('log')
     ax.legend()
-    ax.set_ylabel(f'Validation Error [{units[i]}]')
+    ax.set_ylabel(f'Validation RMSE')
     ax.set_xlabel("Epoch")
     fig.suptitle(name)
 
@@ -211,7 +208,7 @@ def plot_color_merghist(ys, preds, MHmetrics, name, sample_method=None):
     metric_names = ['Total N Halos', r'$z_{25}$', r'$z_{50}$', r'$z_{75}$']
     z_50 = np.array(MHmetrics['z_50'].values)
     U_true = ys[:,0]; V_true = ys[:,2]
-    yhats = data_utils.get_yhats(preds, sample_method)
+    yhats, _ = data_utils.get_yhats_sighats(preds, sample_method)
     Uhats = yhats[:,0]; Vhats = yhats[:,2]
     bins = [-22, -21, -20, -17, -13]
     fig, axs = plt.subplots(len(bins)-1, 2, figsize=(3*2, 1.5*len(bins)), sharey=True, sharex=True)
@@ -374,7 +371,7 @@ def plot_samprops_preds(ys, preds, labels, targs, sample_method='mean'):
 
     fig, axs = plt.subplots(len(targs), 1, figsize=(4, len(targs)*3), sharey='row')
     for i in range(len(targs)):
-        yhats  = data_utils.get_yhats(preds, sample_method)
+        yhats, _ = data_utils.get_yhats_sighats(preds, sample_method)
         if yhats.ndim == 3:
             yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
         y = ys[:,i]
@@ -413,8 +410,7 @@ def compare_phot_preds(taskdir, models, modelnames, sample_method='no_sample', p
     for j in range(len(models)):
         resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
         ys, preds, _ = pickle.load(open(resfile, 'rb'))
-        sighats = preds[1]
-        yhats = data_utils.get_yhats(preds, sample_method, N)
+        yhats, sighats = data_utils.get_yhats_sighats(preds, sample_method, N)
         if yhats.ndim == 3:
             yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
         for i in range(len(uselabels)):
@@ -449,7 +445,7 @@ def compare_phot_err(taskdir, models, modelnames, sample_method=None, N=100, use
     for j in range(len(models)):
         resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
         ys, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats = data_utils.get_yhats(preds, sample_method, N) # returns [n_targs, n_obs] if sample_method is None, [n_targs, n_obs, n_samples] if sample_method is not None
+        yhats, _ = data_utils.get_yhats_sighats(preds, sample_method, N)# yhats is [n_targs, n_obs] if sample_method is None, [n_targs, n_obs, n_samples] if sample_method is not None
         if yhats.ndim == 3:
             yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
         for i in range(len(uselabels)):
@@ -499,15 +495,16 @@ def compare_UVr(taskdir, dataset, models, modelnames, sample_method='mean', N=10
         # Get predicted values 
         resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
         ys, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats = data_utils.get_yhats(preds, sample_method, N=N)
+        yhats, _ = data_utils.get_yhats_sighats(preds, sample_method, N)
         if yhats.ndim == 3:
             yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
         Uhats = yhats[:,0]; Vhats = yhats[:,2]; rhats = yhats[:,5] 
         # If multiple samples, plot 2D histogram with contours, if single sample, scatter color against mag
-        if plottype == 'scatter':#sample_method == 'no_sample':
+        if 'scatter' in plottype:#sample_method == 'no_sample':
             sighats = preds[1]
             Usighats = sighats[:,0]; Vsighats = sighats[:,2]; rsighats = sighats[:,5]
             axs[j+1].plot(rhats, Uhats-Vhats, 'ko', markersize=2, alpha=0.1)
+        if plottype == 'scatter_errbar':
             UVerr = np.sqrt(Usighats**2 + Vsighats**2)  #np.sqrt(np.std(rsighats)**2 + np.std(Usighats-Vsighats)**2) # maybe not quite correct, since this is if the errors are independent
             axs[j+1].errorbar(rhats, Uhats-Vhats, xerr=rsighats, yerr=UVerr, color='k', ls='none', elinewidth=0.05, alpha=0.5)
             axs[j+1].legend(handles=[mpl.lines.Line2D([0], [0], color='k', lw=0.5, label='progogated U-V error'), mpl.lines.Line2D([0], [0], marker='o', markersize=5, markerfacecolor='k', color='w', label='sample')], loc='upper right')
@@ -578,7 +575,7 @@ def compare_CMDs(taskdir, dataset, models, modelnames, colors, sample_method='me
         # Get predicted values 
         resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
         ys, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats = data_utils.get_yhats(preds, sample_method, N)
+        yhats, _ = data_utils.get_yhats_sighats(preds, sample_method, N)
         if yhats.ndim == 3:
             yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
         for i in range(len(colors)):
@@ -644,7 +641,7 @@ def compare_UVr_slice(taskdir, dataset, models, modelnames, sample_method='mean'
         else: 
             resfile = f'{taskdir}/{models[j]}/testres.pkl'
         ys, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats = data_utils.get_yhats(preds, sample_method)
+        yhats, _ = data_utils.get_yhats_sighats(preds, sample_method)
         if yhats.ndim == 3:
             yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
         Uhats = yhats[:,0]; Vhats = yhats[:,2]; rhats = yhats[:,5]
@@ -694,7 +691,7 @@ def compare_color_merghist(taskdir, dataset, models, modelnames, sample_method=N
             resfile = f'{taskdir}/{models[j]}/testres.pkl'
             MHmetrics = pickle.load(open(f'../Data/vol100/{dataset}_[0, 1, 3, 4]_[0, 1, 2, 3, 4, 5, 6, 7]_[70, 10, 20]_testMHmetrics.pkl', 'rb'))
         _, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats = data_utils.get_yhats(preds, sample_method) 
+        yhats, _ = data_utils.get_yhats_sighats(preds, sample_method)
         Uhats = yhats[:,0]; Vhats = yhats[:,2]  
         for i in range(len(Vbins)-1):
             Uhat = Uhats[np.where((Vhats > Vbins[i]) & (Vhats < Vbins[i+1]))[0]]
@@ -782,7 +779,7 @@ def compare_corr_band_old(taskdir, vol, dataset, models, modelnames, by='V mag',
         if dataset not in model_ds:
                 print(f'WARNING: {models[j]} was trained on {model_ds} not {dataset}. Shouldnt compare models run on different datasets')
         _, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats  = data_utils.get_yhats(preds, sample_method) 
+        yhats, _ = data_utils.get_yhats_sighats(preds, sample_method)
         V_pred = yhats[:,2]; U_pred = yhats[:,0] 
         ax_idx = j if plotdiff else j+1
         for i in range(len(bins)-1):
@@ -888,7 +885,7 @@ def compare_corr_band(taskdir, vol, dataset, models, modelnames, modelcolors, by
         # Get the predicted PS for each V-mag bin, for each realization
         resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
         _, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats = data_utils.get_yhats(preds, sample_method, N) 
+        yhats, _ = data_utils.get_yhats_sighats(preds, sample_method, N)
         V_preds = yhats[:,:,2] # not flattened - 10000 realizations per obs
         ps_preds_allbins, rel_errs_allbins, N_pred_allbins = [], [], [] # PS, rel err on PS and N gals for each realization, for each bin
         for i in range(len(bins)-1):
@@ -968,7 +965,7 @@ def compare_light_mass(taskdir, vol, dataset, models, modelnames, sample_method=
         else: 
             resfile = f'{taskdir}/{models[j]}/testres.pkl'
         _, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats = data_utils.get_yhats(preds, sample_method)
+        yhats, _ = data_utils.get_yhats_sighats(preds, sample_method)
         Khats = yhats[:,3]
         predMLR, xedges, yedges = np.histogram2d(Mvir, Khats, bins=100, density=True) #range=extent, # set x and y ranges becasue otherwise kl div will be lower if predicted dist has huge range
         preMLR = np.where(predMLR==0, 0.001, predMLR) # add small value to zero bins, otherwise KL_div will be inf for those bins # # COULD TRY instead normalizing only after histograming, and normalize to not exactly std normal to add some small values predUVr = (predUVr - np.mean(predUVr))/np.std(predUVr) 
@@ -1006,8 +1003,7 @@ def compare_props_preds(taskdir, models, modelnames, labelunits, sample_method=N
     for j in range(len(models)):
         resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
         ys, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats  = data_utils.get_yhats(preds, sample_method)
-        sighats = preds[1]
+        yhats, sighats = data_utils.get_yhats_sighats(preds, sample_method)
         if yhats.ndim == 3:
             yhats, ys = data_utils.flatten_sampled_yhats(yhats, ys)
         for i in range(len(uselabels)):
@@ -1023,6 +1019,7 @@ def compare_props_preds(taskdir, models, modelnames, labelunits, sample_method=N
 def compare_sigma_hists(taskdir, models, modelnames, uselabels, plot_zscores=True):
     '''
     For given models, look at the distribution of the predicted sigmas (and the distirbution of z-scores if desired) 
+    For cov-predicting models, just look at diags
     NOTE: If using a guassian loss func, and sigmas not roughly guassian, something is going wrong
           Not necesarily true if using Navarro since not constraining to be guassian 
     '''
@@ -1032,13 +1029,17 @@ def compare_sigma_hists(taskdir, models, modelnames, uselabels, plot_zscores=Tru
     for j in range(len(models)):
         resfile = f'{taskdir}/FHO/{models[j]}_testres.pkl' if 'FHO' in models[j] else f'{taskdir}/{models[j]}/testres.pkl'
         ys, preds, _ = pickle.load(open(resfile, 'rb'))
-        yhats = preds[0]; sighats = preds[1]
+        muhats = preds[0]; var = preds[1]
+        if var.shape == muhats.shape: # var is sighats
+            sighats = var
+        else: # var is cov
+            sighats = np.sqrt(np.diagonal(var, axis1=1, axis2=2)) 
         for i in range(len(uselabels)):
             y = ys[:,i] 
-            yhat = yhats[:,i] 
+            muhat = muhats[:,i] 
             sighat = sighats[:,i] 
             if plot_zscores:
-                z = (y - yhat)/sighat
+                z = (y - muhat)/sighat
                 axs[0,j].hist(sighat, bins=50, alpha=0.5, label=uselabels[i]); axs[0,j].set_xlabel('Predicted sig [mag]') # density=True, 
                 #axs[0,j].semilogy()
                 axs[0,j].legend(loc='upper left')
@@ -1125,10 +1126,11 @@ def plot_targ(ax, yhat, sighat, y, lims=None, textcmap=None, rmse_min=None, rmse
         X, Y = np.meshgrid((x_pos[1:]+x_pos[:-1])/2, (y_pos[1:]+y_pos[:-1])/2)
         z_levels = 4 #[np.percentile(flat_nonzero,2), np.percentile(flat_nonzero,50)] # np.percentile(vals.flatten(),2) = the bin val number for which 98% of the bins are above (98% of the data is within), since np.percentile(vals.flatten(),98) = the bin val number for which 98% of the data is below
         cs = ax.contour(X,Y, vals.T, levels=z_levels, linewidths=0.4, alpha=0.8, colors='white') # np.log(vals.T+1)
-    elif plottype == 'scatter':
+    elif 'scatter' in plottype:
         ax.plot(y, yhat, 'ko', markersize=1, alpha=0.05)
-        ax.errorbar(y, yhat, yerr=sighat, color='k', ls='none', elinewidth=0.5, alpha=0.9)
-        ax.legend(handles=[mpl.lines.Line2D([0], [0], color='k', lw=0.5, label='predicted sigma'), mpl.lines.Line2D([0], [0], marker='o', markersize=5, markerfacecolor='k', color='w', label='sample')], loc='upper right')
+        if plottype == 'scatter_errbar':
+            ax.errorbar(y, yhat, yerr=sighat, color='k', ls='none', elinewidth=0.5, alpha=0.9)
+            ax.legend(handles=[mpl.lines.Line2D([0], [0], color='k', lw=0.5, label='predicted sigma'), mpl.lines.Line2D([0], [0], marker='o', markersize=5, markerfacecolor='k', color='w', label='sample')], loc='upper right')
     else: raise ValueError(f'plottype must be "KDE", "heat" or "scatter" not {plottype}')
     
     # Report error 

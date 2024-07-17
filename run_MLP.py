@@ -23,17 +23,18 @@ except ModuleNotFoundError:
         from dev import data_utils, run_utils, models
 
 
-def run_MLP(taskdir, d, retrain=False, gpu=False):
+def run_MLP(taskdir, d, retrain=False, retest=False, gpu=False):
 
     name = d['exp_id']
     print(f"Running model {name}\nConfig dict {d}")
 
     # Get data (create if not already created)
     dparams = d['data_params']
-    if not os.path.exists(dparams['datapath']):
-        print(f"  Final halos only dataset {dparams['datapath']} not already created, creating now")
-        dpath = dparams['datapath'][:dparams['datapath'].find('DS')]
-        targ_type = dparams['datapath'][dparams['datapath'].find('DS2_')+4:dparams['datapath'].find('_FHO')]
+    dataset_path = dparams['datapath']
+    if not os.path.exists(dataset_path):
+        print(f"  Final halos only dataset {dataset_path} not already created, creating now")
+        dpath = dataset_path[:dataset_path.find('DS')]
+        targ_type = dataset_path[dataset_path.find('DS2_')+4:dataset_path.find('_FHO')]
         data_utils.data_finalhalos(dpath, dparams['dataset'], targ_type, dparams['use_feats'], dparams['use_targs'], savepath=dataset_path) # data_utils.data_fake()
     print(f'  Loading data from {dataset_path}')
     traindata, valdata, testdata = pickle.load(open(f'{dataset_path}', 'rb')) 
@@ -50,16 +51,17 @@ def run_MLP(taskdir, d, retrain=False, gpu=False):
         print(f'  Retraining model {name} - deleting existing {files}')
         for f in files:
             os.remove(f'{taskdir}/FHO/{f}')
-
     
     # Save config for future reference
+    print(f'  Saving config to {taskdir}/FHO/{name}_config.json')
     json.dump(d, open(f'{taskdir}/FHO/{name}_config.json', 'w')) # f'../{taskdir}/FHO/{name}_config.json'
 
     # Train (if not already trained)
-    predict_dist = d['run_params']['loss_func'] in ['GaussNd', 'Navarro', 'Navarro2', 'GaussNd_torch']
+    predict_dist = d['run_params']['loss_func'] in ['GaussNd', 'Navarro', 'Navarro2', 'GaussNd_torch','GaussNd_corr']
     if d['modelname'] == 'SimpleDistNet': model = models.SimpleDistNet(d['hyper_params'], in_channels, out_channels)
     elif d['modelname'] == 'SimpleDistNet2': model = models.SimpleDistNet2(d['hyper_params'], in_channels, out_channels)
     elif d['modelname'] == 'SimpleNet': model = models.SimpleNet(100, in_channels, out_channels)
+    elif d['modelname'] == 'SimpleFullDistNet': model = models.SimpleFullDistNet(d['hyper_params'], in_channels, out_channels)
     else: raise ValueError(f"Model name {d['modelname']} not recognized")
     if not os.path.exists(modelpath):
         train_results = simple_train(model, trainloader, d['run_params'], d['learn_params'], valloader, modelpath, gpu) # YES, SHOULDNT USE SAME TEST SET FOR VALIDATION, BUT IT REALLY SHOULDNT AFFECT ANYTHING AND THIS IS JUST FOR DEBUGGING
@@ -95,7 +97,7 @@ def simple_train(model, trainloader, run_params, learn_params, valloader, modelp
     lr = learn_params['learning_rate']
     clip = learn_params['clip']
     loss_fn = run_params['loss_func']
-    predict_mu_sig = True if loss_fn in ['GaussNd', 'Navarro', 'Navarro2', 'GaussNd_torch'] else False
+    predict_dist = True if loss_fn in ['GaussNd', 'Navarro', 'Navarro2', 'GaussNd_torch','GaussNd_corr'] else False
     loss_func = run_utils.get_loss_func(loss_fn)
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
@@ -118,13 +120,16 @@ def simple_train(model, trainloader, run_params, learn_params, valloader, modelp
         for x, y in trainloader:
             totloss, errloss, sigloss = torch.tensor(0), torch.tensor(0), torch.tensor(0)
             optimizer.zero_grad()
-            if predict_mu_sig:
-                muhat, logsighat = model(x) # NOTE: if model is FullDistNet then losgsighat has n_targs**2/2 values, e.g. to reshape into LT full cov matrix
-                sighat = torch.exp(logsighat)
-                if loss_fn in ['GaussNd', 'Navarro','Navarro2', 'GaussNd_corr']: 
-                    totloss, errloss, sigloss = loss_func(muhat, y, sighat)
-                elif loss_fn == 'GaussNd_torch': # Torch GaussianNLLLoss expects var, not sig, and doesnt seperate loss terms
-                    totloss = loss_func(muhat, y, sighat**2)
+            if predict_dist:
+                muhat, out2 = model(x)
+                if loss_fn == 'GaussNd_corr': # out2 is unconstrained vec [n_obs, n_targ*(n_targ-1)/2+n_targ]
+                    totloss = loss_func(muhat, y, out2) 
+                else:
+                    sighat = torch.exp(out2) # out2 is logsighat [n_obs, n_targ]
+                    if loss_fn in ['GaussNd', 'Navarro','Navarro2']: 
+                        totloss, errloss, sigloss = loss_func(muhat, y, sighat)
+                    elif loss_fn == 'GaussNd_torch': # Torch GaussianNLLLoss expects var, not sig, and doesnt seperate loss terms
+                        totloss = loss_func(muhat, y, sighat**2)    
             else: 
                 yhat = model(x)
                 totloss = loss_func(yhat, y)
@@ -132,13 +137,14 @@ def simple_train(model, trainloader, run_params, learn_params, valloader, modelp
             totloss.backward()
             if eval(clip): nn.utils.clip_grad_value_(model.parameters(), clip_value=0.5)
             optimizer.step()
+
         totloss_all.append(np.round(epoch_totloss/len(trainloader),5))
         errloss_all.append(np.round(epoch_errloss/len(trainloader),5))
         sigloss_all.append(np.round(epoch_sigloss/len(trainloader),5))
 
         # Perform validation test and asess early stopping 
         if e % val_epoch == 0:
-            ys, preds = simple_test(valloader, model, predict_mu_sig)
+            ys, preds = simple_test(valloader, model, predict_dist)
             val_rmse = np.std(preds[0] - ys, axis=0)
             val_rmse_all.append(val_rmse)
             val_preds_all.append(preds)
@@ -155,7 +161,7 @@ def simple_train(model, trainloader, run_params, learn_params, valloader, modelp
         if counter >= patience: 
             print(f'    Early stopping at epoch {e} due to no improvement in validation loss')
             break
-        print(f'    Epoch {e}', end="\r") 
+        #print(f'    Epoch {e}', end="\r") 
 
     epochexit = e if counter >= patience else n_epochs
     train_results = {'loss_all':totloss_all, 'errloss_all':errloss_all, 'sigloss_all':sigloss_all, 'val_rmse_all':val_rmse_all, 'val_preds_all':val_preds_all, 'epochexit':epochexit} 
@@ -166,19 +172,31 @@ def simple_train(model, trainloader, run_params, learn_params, valloader, modelp
 # Test simple model
 def simple_test(loader, model, predict_dist):
     '''
-    Returns targets and predictions
+    Returns 
+        1) ys = [n_obs, n_targs] array of true values
+        2) preds 
+            If not predicting dist:
+                [n_obs, n_targs] array of predicted mus
+            If predicting diag sigs:
+                ([n_obs, n_targs], [n_obs, n_targs]) arrays of predicted mus and predicted sigs, where sigs are (sqrt of the) variances on the diagonal of a full covariance matrix of targets
+            If predicting full sigs:
+                ([n_obs, n_targs], [n_obs, n_targ*n_targ]) arrays of predicted mus and predicted cov
     '''
   
-    ys, yhats, sigs, xs, = [],[], [], []  # add option to return xs
+    ys, yhats, sigs, xs, = [], [], [], []  # add option to return xs
     model.eval()
     with torch.no_grad():
         for x, y in loader: 
             ys.append(y)
             xs.append(x)
             if predict_dist:
-                pred_mu, pred_logsig = model(x)
+                pred_mu, out2 = model(x) # NOTE: if model is FullDistNet then pred_logsig is really vec, has n_targs**2/2 values, e.g. to reshape into LT full cov matrix
                 yhats.append(pred_mu)
-                sigs.append(torch.exp(pred_logsig))
+                if out2.shape[1] > pred_mu.shape[1]: # out2 is vec [n_obs, n_targ*(n_targ-1)/2+n_targ]
+                    cov = run_utils.cov_from_vec(out2, n_targ=len(pred_mu[0,:]), n_obs=len(pred_mu)) # convert to cov matrix
+                    sigs.append(cov)
+                else:
+                    sigs.append(torch.exp(out2)) # out2 is logsighat [n_obs, n_targ]
             else:
                 yhat = model(x)
                 yhats.append(yhat)
