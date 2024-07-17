@@ -1,6 +1,7 @@
 import os, sys, json, shutil, io
 import os.path as osp
 import numpy as np
+import math
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
@@ -123,7 +124,7 @@ def get_downsize_func(method_num):
     return function
 
 
-def test(loader, model, n_targ, predict_dist = False, return_x = False):
+def test(loader, model, n_targ, predict_dist = False, return_x = False, device='cpu'):
     '''
     Returns targets and predictions
     '''
@@ -134,9 +135,13 @@ def test(loader, model, n_targ, predict_dist = False, return_x = False):
             ys.append(data.y.view(-1,n_targ))
             xs.append(data.x)
             if predict_dist:
-                pred_mu, pred_logsig = model(data)
+                pred_mu, out2 = model(data) # NOTE: if model is FullDistNet then pred_logsig is really vec, has n_targs**2/2 values, e.g. to reshape into LT full cov matrix
                 yhats.append(pred_mu)
-                sigs.append(torch.exp(pred_logsig)) # convert from log(sig) to sig
+                if out2.shape[1] > pred_mu.shape[1]: # out2 is vec [n_obs, n_targ*(n_targ-1)/2+n_targ]
+                    cov = cov_from_vec(out2, n_targ=len(pred_mu[0,:]), n_obs=len(pred_mu), device=device) # convert to cov matrix
+                    sigs.append(cov)
+                else:
+                    sigs.append(torch.exp(out2)) # out2 is logsighat [n_obs, n_targ]
             else:
                 yhat = model(data)
                 yhats.append(yhat)
@@ -156,7 +161,7 @@ def test(loader, model, n_targ, predict_dist = False, return_x = False):
          return ys, preds
     
 
-def final_test(taskdir, modelname):
+def final_test(taskdir, modelname, device):
     '''
     Final test on test set
     '''
@@ -188,7 +193,7 @@ def final_test(taskdir, modelname):
     model.load_state_dict(torch.load(f'{taskdir}/{modelname}/model_best.pt', map_location=torch.device('cpu')))
     n_targ = len(used_targs)
     predict_dist = True if hyper_params['get_sig'] or hyper_params['get_cov'] else False 
-    ys, preds = test(test_loader, model, n_targ, predict_dist) # returned preds[1] is sig not logsig
+    ys, preds = test(test_loader, model, n_targ, predict_dist, device=device) # returned preds[1] is sig not logsig
     if predict_dist: yhats = preds[0]
     else: yhats = preds
     metrics = {'rmse': np.std(yhats - ys, axis=0),
@@ -200,6 +205,75 @@ def final_test(taskdir, modelname):
 
     return ys, preds, metrics
 
+def cov_from_vec(vec, n_targ, n_obs, dtype=torch.float64, device='cpu', raiseErrors=True):
+
+    # Cast to float64 to avoid weird issues from precision
+    vec = vec.type(dtype)
+    low_tri_idxs = torch.tril_indices(n_targ, n_targ, offset=0).tolist()
+    # Fill L_unc with unconstrained values
+    L_unc = torch.zeros(n_obs, n_targ, n_targ).type(dtype).to(device)
+    for i in range(n_obs): # If this is slow, replace using a mask
+        L_unc[i][low_tri_idxs] = vec[i]
+    # Add constraint that diagonals positive
+    pos_diag = torch.nn.Softplus()(torch.diagonal(L_unc, dim1=-1, dim2=-2)).type(dtype) #torch.exp(torch.diagonal(L_unc, dim1=-1, dim2=-2)) # could also try enforcing pos with some act func (like Softplus below)
+    diag_mask = torch.zeros(L_unc.shape, dtype=torch.bool).to(device)
+    diag_mask[:, range(L_unc.shape[-1]), range(L_unc.shape[-2])] = True
+    L = L_unc.masked_scatter(diag_mask, pos_diag)
+    # Compute covariance matrix
+    cov = torch.matmul(L, torch.transpose(L, dim0=1, dim1=2)) # L * L.t() 
+    # Add small values to diag for stability
+    cov = cov + torch.eye(n_targ).to(device)*1e-8
+
+    if not is_positive_definite(cov) and raiseErrors:
+        print(f'Covariance matrix computed using cov_from_vec is not positive definite') #print(f'vec.dtype() {vec.dtype}, L_unc.dtype {L_unc.dtype}, L.dtype {L.dtype}, cov.dtype() {cov.dtype}')
+        torch.set_printoptions(precision=10); c = 0
+        for i in range(n_obs):
+            if not is_positive_definite(cov[i]): 
+                print(f'Covariance matrix at {i} is NOT positive definite:\n   vec[{i}] = {vec[i]}'); c+=1 # \n   cov[{i}]= {cov[i]}
+        raise ValueError(f'Total {c} out of {n_obs} covs are not positive definite')
+
+    return cov
+
+
+
+def cov_from_vec2(vec, device="cpu"): # "vector_to_Cov"
+    """ 
+    Implementation by Chirag's other student 
+        Convert unconstrained vector into a positive-diagonal, symmetric covariance matrix
+        by converting to cholesky matrix, then doing Cov = L @ L^T 
+        (https://en.wikipedia.org/wiki/Cholesky_decomposition)
+    """
+
+    D = int((-1.0 + math.sqrt(1.0 + 8.0 * vec.shape[-1])) / 2.0)  # Infer dimensionality; D * (D + 1) / 2 = n_tril
+    B = vec.shape[0]  # Batch dim
+    
+    # Get indices of lower-triangular matrix to fill
+    tril_indices = torch.tril_indices(row=D, col=D, offset=0)
+    
+    # Fill lower-triangular Cholesky matrix
+    L = torch.zeros((B, D, D)).to(device=device)
+    mask1 = torch.zeros(L.shape, device=L.device, dtype=torch.bool)
+    mask1[:, tril_indices[0], tril_indices[1]] = True
+    L = L.masked_scatter(mask1, vec)
+    
+    # Enforce positive diagonals
+    positive_diags = torch.nn.Softplus()(torch.diagonal(L, dim1=-1, dim2=-2)) 
+    mask2 = torch.zeros(L.shape, device=L.device, dtype=torch.bool)
+    mask2[:, range(L.shape[-1]), range(L.shape[-2])] = True
+    L = L.masked_scatter(mask2, positive_diags)
+    
+    # Cov = L @ L^T 
+    Cov = torch.einsum("bij, bkj ->bik",L, L)
+
+    return Cov
+
+
+def is_positive_definite(tensor):
+    try:
+        _ = torch.linalg.cholesky(tensor)
+        return True
+    except RuntimeError:
+        return False
 
 # def final_test(taskdir, modelname):
 #     '''
@@ -504,6 +578,7 @@ def get_modelsDF(taskdir, type='GNN', dataset=None):
     models = pd.DataFrame.from_dict(all_info)   
     #models['abs bias'] = np.abs(models['bias']) 
     #models = models.sort_values(by=['rho', 'rmse', 'R2', 'abs bias'], ascending=[False, True, False, False])
+    models = models.sort_values(by=['exp'], ascending=True)
     #models.drop(columns=['abs bias'], inplace=True)
 
 

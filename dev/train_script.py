@@ -25,12 +25,6 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, exp_id
     Train and validate model (for one or multiple trials) and save results
     """
 
-    # for k in ["hidden_channels", "conv_layers", "decode_layers"]: # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
-    #     if isinstance(hyper_params[k], str): hyper_params[k] = int(hyper_params[k]) 
-    # for k in ["n_epochs", "n_trials", "batch_size", "val_epoch", "patience", "l1_lambda", "l2_lambda", "num_workers"]: # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
-    #     if isinstance(run_params[k], str): run_params[k] = int(run_params[k]) 
-    # for k in learn_params.keys(): # WHY ARE THINGS GETTING SET AS A STRING WHEN RUNNING SWEEP??)
-    #     if isinstance(learn_params[k], str) and k != "schedule": learn_params[k] = float(learn_params[k]) 
     if gpu not in [True, False]: raise ValueError(f"gpu must be True or False, not {gpu}")
     p = '' if proc == None else f'[proc {proc}] '
     
@@ -74,13 +68,12 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, exp_id
     if len(train_data[0].y) != len(targ_names): raise ValueError(f"Number of targets in data ({len(train_data[0].y)}) does not match number of targets in data_params ({len(targ_names)})")   
     if train_data[0].x.numpy().shape[1] != len(data_params['use_feats']): raise ValueError(f"Number of features in data ({train_data[0].x.numpy().shape[1]}) does not match number of features in data_params ({len(data_params['use_feats'])})")   
     val_loader = DataLoader(val_data, batch_size=int(run_params['batch_size']), shuffle=0, num_workers=run_params['num_workers'])    
-    hyper_params['in_channels']= train_data[0].x.numpy().shape[1] # construct_dict['hyper_params']['in_channels']=n_feat
-    hyper_params['out_channels']= n_targ # construct_dict['hyper_params']['out_channels']=n_targ
+    hyper_params['in_channels'] = train_data[0].x.numpy().shape[1] # construct_dict['hyper_params']['in_channels']=n_feat
+    hyper_params['out_channels'] = n_targ # construct_dict['hyper_params']['out_channels']=n_targ
     
-    # Initialize evaluation metrics 
-    print(eval(str(run_params['performance_plot'])) != None)
+    # Initialize evaluation metrics  #print(eval(str(run_params['performance_plot'])) != None)
     if eval(str(run_params['performance_plot'])) != None:
-        performance_plot = get_performance_plot(run_params['performance_plot']); print(f"{p}Line 84", flush=True) # returns None if performance_plot = None
+        performance_plot = get_performance_plot(run_params['performance_plot']) # returns None if performance_plot = None
         # tr_accs_alltrials, va_accs_alltrials, scatter_alltrials, preds_alltrials, lowest_alltrials = [], [], [], [], [] # lists in case n_trials > 1 
 
     ############### LOOP THROUGH TRIALS ###################
@@ -147,8 +140,8 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, exp_id
         print(f'{p}BEGINING TRAINING{s} OF {exp_id} ({n_epochs} epochs total)', flush=True)
         for epoch in tqdm(range(n_epochs)):
 
-            # Train for one epoch (NOTE: trainloss is the total loss that includes the other losses returned)
-            tot_loss, err_loss, sig_loss, l1_loss, l2_loss = train(epoch, learn_params["schedule"], model, train_loader, run_params, gpu, n_targ, loss_func, accelerator, optimizer, scheduler)
+            # Train for one epoch (NOTE: tot_loss includes the other losses returned)
+            tot_loss, err_loss, sig_loss, l1_loss, l2_loss = train(epoch, learn_params["schedule"], model, train_loader, run_params, gpu, n_targ, loss_func, accelerator, optimizer, scheduler, device)
             tot_losses.append(tot_loss) 
             sig_losses.append(sig_loss) # this is sig_loss, unless predict_cov, then cov_loss
             err_losses.append(err_loss)
@@ -164,8 +157,8 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, exp_id
                 
                 # Perform validation   #train_metric, val_metric, lowest_metric, low_ys, low_pred, k, early_stop = get_val_results(model, run_params, data_params, train_loader, val_loader, optimizer, epoch, metric, k, lowest_metric, save, val_epoch, early_stop, n_targ, low_ys, low_pred, out_dir_n)
                 predict_dist = True if hyper_params['get_sig'] or hyper_params['get_cov'] else False 
-                tr_ys, tr_preds = run_utils.test(train_loader, model, n_targ, predict_dist)
-                va_ys, va_preds = run_utils.test(val_loader, model, n_targ, predict_dist)
+                tr_ys, tr_preds = run_utils.test(train_loader, model, n_targ, predict_dist, device=device)
+                va_ys, va_preds = run_utils.test(val_loader, model, n_targ, predict_dist, device=device)
                 if predict_dist: # If predicting mu and sig, test returns [pred_mu, pred_sig], and if predicting mu and cov, test returns [pred_mu, pred_cov]
                     tr_yhats = tr_preds[0]; va_yhats = va_preds[0]
                 else:
@@ -235,7 +228,7 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, exp_id
           
         ###################### CHECK IF FINAL MODEL IS THE BEST (possible that last few training epochs werent done before last val epoch; depends on val_epoch and n_epochs) #########################
    
-        va_ys, va_preds = run_utils.test(val_loader, model, n_targ, predict_dist)
+        va_ys, va_preds = run_utils.test(val_loader, model, n_targ, predict_dist, device=device)
         if predict_dist: 
             va_yhats = va_preds[0]
         else:
@@ -255,7 +248,7 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, exp_id
         
         # Perform testing 
         model.load_state_dict(torch.load(modelfile))
-        ys, preds = run_utils.test(val_loader, model, n_targ, predict_dist) #  WAS THIS AN ISSUE??? run_utils.test(val_loader, model, n_targ, hyper_params['get_sig'], hyper_params['get_cov'])
+        ys, preds = run_utils.test(val_loader, model, n_targ, predict_dist, device=device) #  WAS THIS AN ISSUE??? run_utils.test(val_loader, model, n_targ, hyper_params['get_sig'], hyper_params['get_cov'])
         if predict_dist: # If predicting mu and sig, test returns [pred_mu, pred_sig]
             yhats = preds[0]
         else:
@@ -330,14 +323,13 @@ def run(run_params, data_params, learn_params, hyper_params, out_pointer, exp_id
     if n_trials > 1: print(f'\nFINISHED ALL {n_trials} TRIALS', flush=True)
     
 
-def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_func, accelerator, optimizer, scheduler):
+def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_func, accelerator, optimizer, scheduler, device):
     '''
     Train for one epoch
     NOTE: When using uncorrelated guassian loss funcs, model returns 
-            sig = predicted standard deviations (aka sig)
+            logsighat = [n_obs, n_targs] predicted SD of each target alone, e.g. diagonal of cov matrix
          When using correlated guassion loss funcs, model returns
-            sig = predicted standard deviations (aka sig)
-            cov = predicted covariances (aka rho?)
+            logsighat = [n_obs, n_targs*(n_targs+1)/2] predicted covariances (SDs) of each target with every other target, e.g. values of the lower triangle of cov matrix
     '''
     
     model.train()
@@ -356,23 +348,39 @@ def train(epoch, schedule, model, train_loader, run_params, gpu, n_targ, loss_fu
     for data in train_loader: 
         if not gpu:
             data = data.to('cpu')
+        # if predict_dist:
+        #     muhat, logsighat = model(data)  # var is either sig OR cov
+        #     sighat = torch.exp(logsighat) # assume prediction is of log var instead of var to ensure positivity once exp is taken
+        #     if run_params['loss_func'] == 'GaussNd_torch': 
+        #         loss = loss_func(muhat, data.y.view(-1,n_targ), sighat**2) # torch GaussianNLLLoss expects var, not sig
+        #         err_loss = np.NaN; sig_loss = np.NaN
+        #     else:
+        #         loss, err_loss, sig_loss = loss_func(muhat, data.y.view(-1,n_targ), sighat) 
+        #     er_loss+=err_loss
+        #     si_loss+=sig_loss
+        # else:
+        #     out = model(data)  
+        #     loss = loss_func(out, data.y.view(-1,n_targ))
         if predict_dist:
-            muhat, logsighat = model(data)  # var is either sig OR cov
-            #if np.any(torch.isnan(logsighat)): raise ValueError('NaNs in predicted SD')
-            sighat = torch.exp(logsighat) # assume prediction is of log var instead of var to ensure positivity once exp is taken
-            if run_params['loss_func'] == 'GaussNd_torch': 
-                loss = loss_func(muhat, data.y.view(-1,n_targ), sighat**2) # torch GaussianNLLLoss expects var, not sig
-                err_loss = np.NaN; sig_loss = np.NaN
+            muhat, out2 = model(data)
+            loss, err_loss, sig_loss = torch.tensor(np.NaN), torch.tensor(np.NaN), torch.tensor(np.NaN)
+            if run_params['loss_func'] == 'GaussNd_corr': # out2 is unconstrained vec [n_obs, n_targ*(n_targ-1)/2+n_targ]
+                loss = loss_func(muhat, data.y.view(-1,n_targ), out2, device=device) 
             else:
-                loss, err_loss, sig_loss = loss_func(muhat, data.y.view(-1,n_targ), sighat) 
+                sighat = torch.exp(out2) # out2 is logsighat [n_obs, n_targ]
+                if run_params['loss_func'] in ['GaussNd', 'Navarro','Navarro2']: 
+                    loss, err_loss, sig_loss = loss_func(muhat, data.y.view(-1,n_targ), sighat)
+                elif run_params['loss_func'] == 'GaussNd_torch': # Torch GaussianNLLLoss expects var, not sig, and doesnt seperate loss terms
+                    loss = loss_func(muhat, data.y.view(-1,n_targ), sighat**2)    
             er_loss+=err_loss
             si_loss+=sig_loss
-        else:
-            out = model(data)  
-            loss = loss_func(out, data.y.view(-1,n_targ))
+        else: 
+            yhat = model(data)
+            loss = loss_func(yhat, data.y.view(-1,n_targ))
+
         l1_norm = sum(p.abs().sum() for p in model.parameters())
         l2_norm = sum(p.pow(2.0).sum() for p in model.parameters()) 
-        loss = loss + l1_lambda * l1_norm + l2_lambda * l2_norm # add terms to penalize large param values to loss (?)
+        loss = loss + l1_lambda * l1_norm + l2_lambda * l2_norm # add terms to penalize large param values 
         return_loss += loss
         if gpu:
             accelerator.backward(loss)

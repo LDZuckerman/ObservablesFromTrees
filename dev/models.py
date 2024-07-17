@@ -18,21 +18,21 @@ except ModuleNotFoundError:
         from dev import run_utils
 
 
+
 class Sage(Module):
     '''
     GNN model modified slighlty from implemnetation by Christian Jesperson https://github.com/astrockragh/Mangrove/blob/7c00646aeca47c484b5dae52ba6e4598c0367fe2/dev/models.py
-    Model built upon the GraphSAGE convolutional layer. This is a node only model (no global, no edge).
-    Model takes a data object from a dataloader in the forward call and takes out the rest itself. 
+    Node-only model built upon the GraphSAGE convolutional layer.
     '''
 
-    def __init__(self, hidden_channels, in_channels, out_channels, encode=True, conv_layers=3, conv_activation='relu', 
-                    decode_layers=2, decode_activation='none', layernorm=True, get_sig=False, get_cov=False, agg='sum'): # get_rho=False, 
+    def __init__(self, hidden_channels, in_channels, out_channels, encode=True, conv_layers=3, conv_activation='ReLU', 
+                    decode_layers=2, decode_activation='LeakyReLU', layernorm=True, get_sig=False, get_cov=False, agg='sum'): # get_rho=False, 
         super(Sage, self).__init__()
 
         self.encode=encode
         if self.encode:
             self.node_enc = MLP(in_channels, hidden_channels, layer_norm=True) 
-        self.decode_activation=decode_activation
+        self.decode_activation=decode_activation # keep this LeakyReLU
         self.conv_activation=conv_activation
         self.layernorm=layernorm
         self.in_channels=int(in_channels)
@@ -41,6 +41,7 @@ class Sage(Module):
         self.predict_sig=get_sig
         self.predict_cov=get_cov #get_rho
         self.agg=agg
+        if self.predict_sig and self.predict_cov: raise ValueError('Must select either diag or full cov, not both')
         
         ########################
         # Convolutional Layers #
@@ -54,9 +55,9 @@ class Sage(Module):
         for _ in range(int(conv_layers-1)):
             self.convs.append(SAGEConv(hidden_channels, hidden_channels))
 
-        ########################
-        # Mu ('decode') Layers #
-        #########################     
+        #############
+        # Mu Layers #
+        #############    
 
         self.decoders = ModuleList()
         self.norms = ModuleList()
@@ -73,18 +74,18 @@ class Sage(Module):
             self.decoders.append(self.decoder)
             self.norms.append(self.norm)
 
-        #################################
-        # SD Layers (same as mu layers) #
-        #################################
+        ######################################
+        # SD Layers (identical to mu layers) #
+        ######################################
 
         if self.predict_sig:
             self.sigs = ModuleList()
             self.sig_norms = ModuleList()
             for _ in range(out_channels):
-                self.sig=ModuleList()
-                self.sig_norm=ModuleList()
+                self.sig = ModuleList()
+                self.sig_norm = ModuleList()
                 for i in range(decode_layers):
-                    if i==decode_layers-1:
+                    if i == decode_layers-1:
                         self.sig_norm.append(LayerNorm(normalized_shape=hidden_channels))
                         self.sig.append(Linear(hidden_channels, 1))
                     else:
@@ -93,53 +94,34 @@ class Sage(Module):
                 self.sigs.append(self.sig)
                 self.sig_norms.append(self.sig_norm)
 
-        ######################
-        # Co-Variance Layers #
-        ######################
+        #############################################
+        # Cov Layers (change shape of final output) #
+        #############################################
 
         if self.predict_cov:
-            self.rhos = ModuleList()
-            self.rho_norms = ModuleList()
-            for _ in range(self.rho):
-                self.rho_l=ModuleList()
-                self.rho_norm=ModuleList()
+            self.covs = ModuleList()
+            self.cov_norms = ModuleList()
+            out_dim = int(out_channels*(out_channels-1)/2+out_channels)
+            for _ in range(out_dim):
+                self.cov_l = ModuleList()
+                self.cov_norm = ModuleList()
                 for i in range(decode_layers):
-                    if i==decode_layers-1:
-                        self.rho_norm.append(LayerNorm(normalized_shape=hidden_channels))
-                        self.rho_l.append(Linear(hidden_channels, 1))
+                    if i == decode_layers-1:
+                        self.cov_norm.append(LayerNorm(normalized_shape=hidden_channels))
+                        self.cov_l.append(Linear(hidden_channels, 1))
                     else:
-                        self.rho_norm.append(LayerNorm(normalized_shape=hidden_channels))
-                        self.rho_l.append(Linear(hidden_channels, hidden_channels))
-                self.rhos.append(self.rho_l)
-                self.rho_norms.append(self.rho_norm)
+                        self.cov_norm.append(LayerNorm(normalized_shape=hidden_channels))
+                        self.cov_l.append(Linear(hidden_channels, hidden_channels))
+                self.covs.append(self.cov_l)
+                self.cov_norms.append(self.cov_norm)
         
         #####################
         # Activation Layers #
         #####################
         
-        self.conv_act=self.conv_act_f()
-        self.decode_act=self.decode_act_f() ## could apply later
+        self.conv_act = run_utils.get_act_func(self.conv_activation) # self.conv_act_f()
+        self.decode_act =  run_utils.get_act_func(self.decode_activation) # self.decode_act_f() ## could apply later
 
-    def conv_act_f(self):
-        if self.conv_activation =='relu':
-            act = ReLU()
-            return act
-        if self.conv_activation =='leakyrelu':
-            act=LeakyReLU()
-            return act
-        if not self.conv_activation:
-            raise ValueError("Please specify a conv activation function")
-
-    def decode_act_f(self):
-        if self.decode_activation =='relu':
-            act = ReLU()
-            return act
-        if self.decode_activation =='leakyrelu':
-            act=LeakyReLU()
-            return act
-        if not self.decode_activation:
-            print("Please specify a decode activation function")
-            return None
 
     def forward(self, graph):
 
@@ -151,7 +133,7 @@ class Sage(Module):
         if self.encode:
             x = self.node_enc(x)
         
-        # PApply graph convolutions to x and edges
+        # Apply graph convolutions to x and edges
         for conv in self.convs:
             x = conv(x, edge_index)
             x=self.conv_act(x) 
@@ -161,14 +143,15 @@ class Sage(Module):
             x = global_max_pool(x, batch)
         
         # Apply mu layers to x to get predicted mus
-        x_out=[]
+        mus=[]
         for norm, decode in zip(self.norms, self.decoders):
             x1=clone(x)
             for n, d in zip(norm, decode):
                 x1=d(n(x1))
-                x1=self.decode_act(x1) ##note that these are LeakyReLU and should continue as such, otherwise you have to remove them from the last layer
-            x_out.append(x1)
-        x_out=cat(x_out, dim=1)
+                x1=self.decode_act(x1) 
+            if torch.any(x1) > 100: raise ValueError('mu predictions have become very large')
+            mus.append(x1)
+        mus=cat(mus, dim=1)
         
         # Apply sig layers to x to get predicted sigs - same as above
         if self.predict_sig:
@@ -177,28 +160,31 @@ class Sage(Module):
                 x1=clone(x)
                 for n, d in zip(norm, decode):
                     x1=d(n(x1))
-                    x1=self.decode_act(x1) ##note that these are LeakyReLU and should continue as such, otherwise you have to remove them from the last layer
+                    x1=self.decode_act(x1) 
+                if torch.any(x1) > 100: raise ValueError('sig predictions have become very large')  
                 logsig.append(x1)
-            logsig=cat(logsig, dim=1) # DONT TAKE ABS, INSTEAD ASSUME PREDICTION IS OF LOG SIGMA, TAKE EXP OF MODEL PREDICTION
+            logsig=cat(logsig, dim=1) # Instead of taking abs, treat prediction as log sigmas
 
-        # if self.predict_cov:
-        #     rho=[]
-        #     for norm, decode in zip(self.rho_norms, self.rhos):
-        #         x1=clone(x)
-        #         for n, d in zip(norm, decode):
-        #             x1=d(n(x1))
-        #             x1=self.decode_act(x1) ##note that these are LeakyReLU and should continue as such, otherwise you have to remove them from the last layer
-        #         rho.append(x1)
-        #     rho=cat(rho, dim=1)
-        #     cov = # need to construct from rho and sig, right?
-        #     cov = clamp(tanh(cov), min=-0.999, max=0.999)
-        
-        if self.predict_sig:
-            return x_out, logsig
+        # Apply cov layers to get predicted full cov - same as above 
         if self.predict_cov:
-            return x_out, cov
+            cov=[]
+            for norm, decode in zip(self.cov_norms, self.covs):
+                x1=clone(x)
+                for n, d in zip(norm, decode):
+                    x1=d(n(x1))
+                    x1=self.decode_act(x1) 
+                if torch.any(x1) > 100: raise ValueError('cov predictions have become very large') 
+                cov.append(x1)
+            cov=cat(cov, dim=1)
+
+        #print(mus.shape, cov.shape)
+
+        if self.predict_sig:
+            return mus, logsig
+        if self.predict_cov:
+            return mus, cov
         else:
-            return x_out
+            return mus
     
 
 ############################
@@ -225,13 +211,13 @@ class SimpleFullDistNet(nn.Module):
    '''
    Simple MLP that predicts mean and [  ] : 
         mu = mean of the target distribution
-        logfullsig = [    ]  e.g. (sqrt of the) values in the lower triangular full covariance matrix of targets
+        logfullsig = [n_obs, n_targ*(n_targ-1)/2+n_targ]  e.g. (sqrt of the) flattened values in the lower triangular full covariance matrix of targets
    NOTE: does include LayerNorm
    NOTE: eventually should probabaly combine this with the below. Then just rerun the relevant MLPs for consistent naming
    '''
     
    def __init__(self, hyper_params, in_channels, out_channels): 
-    super(SimpleDistNet, self).__init__()
+    super(SimpleFullDistNet, self).__init__()
 
     hidden_layers = hyper_params['hidden_layers']
     h = hyper_params['hidden_channels']
@@ -245,7 +231,7 @@ class SimpleFullDistNet(nn.Module):
         self.linears2.append(nn.Linear(h, h))
         self.linears2.append(act_func) 
     self.linears1.extend([nn.LayerNorm(h), nn.Linear(h, out_channels)]) 
-    self.linears2.extend([nn.LayerNorm(h), nn.Linear(h, out_channels**2/2)]) # want to be able to reshape this to get the LT cov matrix, which would have n_targ**2/2 non-zero entries right?
+    self.linears2.extend([nn.LayerNorm(h), nn.Linear(h, int(out_channels*(out_channels-1)/2+out_channels))]) # LT cov matrix has n_targ*(n_targ-1)/2 + n_targ non-zero entries
     
    def forward(self, x, debug=False):
 
@@ -261,6 +247,8 @@ class SimpleFullDistNet(nn.Module):
     
     if torch.stack([torch.isnan(p).any() for p in self.linears2.parameters()]).any(): raise ValueError('NaNs in weights of sigma layers')
     if torch.stack([torch.isnan(p).any() for p in self.linears1.parameters()]).any(): raise ValueError('NaNs in weights of mu layers')
+    if torch.any(torch.abs(mu) > 100): raise ValueError('mu predictions have become very large')
+    if torch.any(torch.abs(logfullsig) > 100): raise ValueError('logfullsig predictions have become very large')
 
     return mu, logfullsig
    
@@ -309,6 +297,8 @@ class SimpleDistNet(nn.Module):
     
     if torch.stack([torch.isnan(p).any() for p in self.linears2.parameters()]).any(): raise ValueError('NaNs in weights of sigma layers')
     if torch.stack([torch.isnan(p).any() for p in self.linears1.parameters()]).any(): raise ValueError('NaNs in weights of mu layers')
+    if torch.any(torch.abs(mu) > 100): raise ValueError('mu predictions have become very large. Mean(mu) =', torch.mean(mu).item())
+    if torch.any(torch.abs(logsig) > 100): raise ValueError('logfullsig predictions have become very large. Mean(logsig) =', torch.mean(logsig).item())
 
     return mu, logsig
    

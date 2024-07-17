@@ -2,6 +2,16 @@ from pytools import F
 import torch
 from torch.nn import MSELoss, L1Loss, SmoothL1Loss, GaussianNLLLoss
 from torch import log, sum, square
+import sys
+try: 
+    from dev import run_utils
+except ModuleNotFoundError:
+    try:
+        sys.path.insert(0, '~/ceph/ObsFromTrees_2024/ObservablesFromTrees/dev/')
+        from ObservablesFromTrees.dev import run_utils
+    except ModuleNotFoundError:
+        sys.path.insert(0, 'ObservablesFromTrees/dev/')
+        from dev import run_utils
 
 #############################
 ###   Simple loss funcs  ####
@@ -58,36 +68,16 @@ def Navarro(pred_mu, ys, pred_sig):
     return loss, mu_loss, sig_loss
 
 
-def GuassNd_corr(pred_mu, ys, pred_fullsig):
+def GaussNd_corr(pred_mu, ys, vec, device='cpu'):
     '''
     Loss func to fit for variances as a function of X and feature, assuming guassian errors and allowing covariance of features.
-     - pred_cov [n_targ, n_targ, n_obs] (?): predicted covariance of each target
+     - vec = unconstrained model output vector of shape [n_obs, n_targ*(n_targ-1)/2+n_targ]
     '''
 
-    # Steps
-    #     Have network output vector “v”
-    #     Reshape v to a lower triangular matrix L
-    #           L = reshape(v) to get a lower triangular matrix. 
-    #           Will need to write this. Could use something like https://stackoverflow.com/questions/73075280/how-do-i-convert-a-31-vector-into-a-22-lower-triangular-matrix-in-pytorch
-    #     Get cov = L.L^T
-    #     Compute loss = multivariate_normal(mean, cov).log_prob(x)
+    n_targ = len(ys[0,:])
+    n_obs = len(ys)
+    cov = run_utils.cov_from_vec(vec, n_targ, n_obs, device=device) 
+    loss = - torch.distributions.MultivariateNormal(pred_mu, cov).log_prob(ys).sum() # mean() might be "better" but sum() works way better for FHOs, doesnt change GNN results much ...
 
-    # # chol = torch.cholesky(pred_cov) <- should instead predict the lower triangular so that dont need choslsky , then construct full cov from that. e.g. network predict entries of lower triangular (flattened). In loss, convert to lower triagnular, put 
-    # # mu_err = (pred_mu - ys)**2
-    # # y_dist = torch.distributions.MultivariateNormal(pred_mu, pred_cov)  
-    # log_prob = y_dist.log_prob(ys) # ??????
-    
-    raise NotImplementedError('Loss function not yet implemented')
+    return loss 
 
-# If predicting exactly 2 targets?
-def Gauss2d(pred, ys, var):
-    '''2d Gaussian, can be subbed for GaussND'''
-
-    sig1=var[:,0]
-    sig2=var[:,1]
-    z1=(pred[:,0]-ys[:,0])/sig1
-    z2=(pred[:,1]-ys[:,1])/sig2
-    sigloss=sum(log(sig1)+log(sig2))
-    err_loss = sum((z1**2+z2**2)/2)
-    
-    return err_loss+sigloss, err_loss, sigloss

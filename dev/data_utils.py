@@ -1823,29 +1823,37 @@ def sampropsdata_finalhalos(props_data, use_featidxs, use_targidxs):
     return traindata, testdata
 
 
-def get_yhats(preds, sample_method='large_sample', N=100):
+def get_yhats_sighats(preds, sample_method='large_sample', N=100):
     '''
-    Get point estimates from predictions
-        If predictions are single array of predicted means, return that array 
-        If predictions are a tuple of arrays of predicted means and SDs (not log SDs - already exponentiated)
-            If 'method' == 'single', return a single sample from the predicted distribution of each observation
-            If 'method' == 'average', return average of a 1000 samples from the predicted distribution of each observation (which is sort of just a point estimate for the mean, as N->large)
-            If 'method' == 'large_sample', return 1000 samples from the predicted distribution of each observation
+    Returns yhats and sighats from preds
+        If predictions are single array of predicted means, returns
+            yhats = that array 
+            sighats = np.NaN
+        If predictions are a tuple of arrays of predicted means and variances (not log SDs - already exponentiated)
+            yhats = point estimate or large sample from muhats
+                If 'method' is 'single', return a single sample from the predicted distribution of each observation
+                If 'method' is 'average', return average of a 1000 samples from the predicted distribution of each observation (which is sort of just a point estimate for the mean, as N->large)
+                If 'method' is 'large_sample', return 1000 samples from the predicted distribution of each observation
+            sighats = sqrts of diagonal of covariance matrix
+                If variance is single array, return that array
+                If variance is full covariance matrix, take diagonal
     '''
 
     if len(preds) == 2: 
+
         muhats = preds[0]
+        var = preds[1]
+        if var.shape == muhats.shape: # if var is diag cov
+            sigmahats = var
+        if var.shape != muhats.shape: # if var is full cov
+            print('WARNING: Need to figure out how to handle full covarying sigmas when sampling!! For now just useing diagonal') 
+            sigmahats = np.diagonal(np.array(var), axis1=1, axis2=2)
+        else: sigmahats = var
 
         if sample_method == 'no_sample':
             yhats = muhats
-
         else:
-            sigmahats = preds[1]
-            # if sample_method == 'single_': 
-            #     yhats = np.random.normal(muhats, sigmahats) 
-            # else:
             y_samples = [np.random.normal(muhats, sigmahats) for i in range(N)]
-
             if sample_method == 'average_large_sample':
                 yhats = np.mean(y_samples, axis=0)
             elif sample_method == 'large_sample':
@@ -1854,9 +1862,10 @@ def get_yhats(preds, sample_method='large_sample', N=100):
             else: raise ValueError(f'method must be no_sample, average_large_sample, or large_sample not {sample_method}')  
 
     else: 
-        yhats = preds
+        yhats = preds, sigmahats = np.NaN
 
-    return yhats
+    return yhats, sigmahats
+
 
 def flatten_sampled_yhats(yhats, ys):
     '''
